@@ -3,7 +3,7 @@
 Everything here is read-only and capped. Nothing is stored beyond one small archive that is
 unpacked to prove the archive is usable, then deleted with the runner.
 """
-import ast, base64, json, os, random, re, shutil, subprocess, sys, time
+import ast, base64, html, json, os, random, re, shutil, subprocess, sys, time
 from hashlib import md5
 from urllib.parse import urljoin, urlsplit
 
@@ -25,7 +25,7 @@ OLD_GOFILE = os.environ.get('OLD_GOFILE', 'yor-forger-thorn-princess-2,yumemizuk
 OLD_MEDIAFIRE = os.environ.get('OLD_MEDIAFIRE', 'happy-birthday,raiden-shogun-19,leopard-print-pajamas,aeolian-4').split(',')
 OTHER = {'traffic1s': 'the-bathroom,2b-3,hwa', 'terabox': 'rapi-10,blonde,usada-pekora-2', 'yandex': 'exotic-dancer,hutao-3,kashino-3'}
 DL_CAP = int(os.environ.get('DL_CAP_MB', '60')) * 1024 ** 2
-FULL_MAX = int(os.environ.get('FULL_MAX_MB', '400')) * 1024 ** 2
+FULL_MAX = int(os.environ.get('FULL_MAX_MB', '2048')) * 1024 ** 2
 R = {'env': {}, 'checks': []}
 
 
@@ -73,7 +73,9 @@ def decrypt_link(enc):
 
 def sora_meta(sess, url):
     page = sess.get(url).text
-    get = lambda n: ast.literal_eval(re.findall(rf'const\s+{n}\s*=\s*([^;]+?);', page)[0])
+    def get(n):
+        m = re.search(rf'const\s+{n}\s*=\s*(\'(?:[^\'\\]|\\.)*\'|"(?:[^"\\]|\\.)*")\s*;', page)
+        return html.unescape(ast.literal_eval(m.group(1)))
     key, fid, fname = get('keyEncrypte'), get('fileId'), get('fileName')
     d = sess.post('https://sorafolder.com/file-down', headers={'Content-Type': 'application/json'}, data=json.dumps({'keyEncrypte': key})).json()
     if 'error' in d:
@@ -145,6 +147,7 @@ def run_gofile(slug, sess):
         url = post_info(slug, sess)['links'].get('gofile')
         if not url: return rec('gofile', slug, False, why='no gofile link')
         cid = url.rstrip('/').split('/')[-1]
+        open('wt.obf.js', 'w').write(S().get('https://gofile.io/js/wt.obf.js').text)
         g = S(); a = g.post('https://api.gofile.io/accounts')
         if a.status_code != 200: return rec('gofile', slug, False, step='account', status=a.status_code, body=a.text[:100])
         tok = a.json()['data']['token']
@@ -182,6 +185,44 @@ def run_other(host, slug, sess):
         rec(host, slug, False, err=repr(e)[:200])
 
 
+def run_big(slug):
+    try:
+        sess = S(); m = sora_meta(sess, post_info(slug, sess)['links']['sorafolder'])
+        t0 = time.time(); d = timed_get(sess, m['url'], 1 << 40, save='/tmp/big.rar')
+        rec('bigfile', slug, d['complete'], **d); os.remove('/tmp/big.rar')
+    except Exception as e:
+        rec('bigfile', slug, False, err=repr(e)[:200])
+
+
+def run_terabox(slug):
+    try:
+        url = post_info(slug, S())['links'].get('terabox')
+        if not url: return rec('terabox', slug, False, why='no link')
+        surl = re.search(r'surl=([\w-]+)', url)
+        s = S(); s.get(url)
+        r = s.get('https://www.terabox.com/api/shorturlinfo', params={'app_id': '250528', 'web': '1', 'channel': 'dubox', 'clienttype': '0', 'shorturl': '1' + surl.group(1), 'root': '1'})
+        j = r.json()
+        rec('terabox', slug, j.get('errno') == 0, errno=j.get('errno'), files=[f.get('server_filename') for f in j.get('list', [])][:3], keys=sorted(j)[:8])
+    except Exception as e:
+        rec('terabox', slug, False, err=repr(e)[:200])
+
+
+def run_traffic1s(slug):
+    try:
+        url = post_info(slug, S())['links'].get('traffic1s')
+        if not url: return rec('traffic1s', slug, False, why='no link')
+        t = S().get(url).text
+        hosts = sorted(set(re.findall(r'https?://([\w.-]+)', t)))
+        b64 = [x for x in re.findall(r'["\']([A-Za-z0-9+/=]{24,})["\']', t)][:3]
+        dec = []
+        for x in b64:
+            try: dec.append(base64.b64decode(x).decode()[:80])
+            except Exception: pass
+        rec('traffic1s', slug, False, hosts=hosts[:10], decoded=dec, length=len(t))
+    except Exception as e:
+        rec('traffic1s', slug, False, err=repr(e)[:200])
+
+
 if __name__ == '__main__':
     R['env']['runner'] = os.environ.get('RUNNER_NAME', '')
     R['env']['ip'] = S().get('https://api.ipify.org').text
@@ -190,7 +231,8 @@ if __name__ == '__main__':
     try:
         head = sess.get(SITE + '/')
         rec('site', 'home', head.status_code == 200, status=head.status_code)
-        lst = sess.get(SITE + '/page/1/'); slugs = [urlsplit(a.attr('href')).path.strip('/') for a in pq(lst.text)('#post-list .post-item a').items()][:NEW_POSTS]
+        lst = sess.get(SITE + '/page/1/'); slugs = [urlsplit(a.attr('href')).path.strip('/') for a in pq(lst.text)('#post-list .post-item a').items()][:NEW_POSTS + 3]
+        slugs = list(dict.fromkeys(slugs))[:NEW_POSTS]
         rec('site', 'listing', bool(slugs), slugs=slugs)
     except Exception as e:
         rec('site', 'listing', False, err=repr(e)[:200]); slugs = []
@@ -203,7 +245,11 @@ if __name__ == '__main__':
     run_full(S(), cands)
     for s in slugs[:2] + OLD_GOFILE: run_gofile(s, S())
     for s in OLD_MEDIAFIRE: run_mediafire(s, S())
+    run_big('augusta-2')
+    for s in OTHER['terabox'].split(','): run_terabox(s)
+    for s in OTHER['traffic1s'].split(','): run_traffic1s(s)
     for host, ss in OTHER.items():
+        if host != 'yandex': continue
         for s in ss.split(','): run_other(host, s, S())
     json.dump(R, open('results.json', 'w'), indent=1, ensure_ascii=False)
     ok = sum(c['ok'] for c in R['checks']); print(f'\nSUMMARY {ok}/{len(R["checks"])} passed')
