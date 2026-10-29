@@ -119,22 +119,25 @@ def run_sorafolder(label, slug, sess, full_candidates):
 
 
 def run_full(sess, cands):
-    if not cands:
+    if not cands and not os.environ.get('FULL_SLUG'):
         return rec('full', 'smallest', False, why=f'no package under {FULL_MAX >> 20} MB found')
     size, slug, pw = sorted(cands)[0]
+    if os.environ.get('FULL_SLUG'):
+        slug = os.environ['FULL_SLUG']; pw = post_info(slug, sess)['password']
     work = '/tmp/ctel_full'; shutil.rmtree(work, ignore_errors=True); os.makedirs(work)
     try:
         m = sora_meta(sess, post_info(slug, sess)['links']['sorafolder'])
         rar = os.path.join(work, 'pkg.rar')
-        d = timed_get(sess, m['url'], 1 << 40, save=rar)
+        t_dl = time.time(); d = timed_get(sess, m['url'], 1 << 40, save=rar)
         res = dict(slug=slug, expected=size, **d)
         for tool in (['7zz'], ['7z'], ['unrar']):
             if not shutil.which(tool[0]): res[tool[0]] = 'missing'; continue
             out = os.path.join(work, 'x_' + tool[0]); os.makedirs(out)
             cmd = tool + (['x', f'-p{pw or ""}', f'-o{out}', '-y', rar] if tool[0] != 'unrar' else ['x', f'-p{pw or "-"}', '-y', rar, out + '/'])
-            p = subprocess.run(cmd, capture_output=True, text=True)
+            t_x = time.time(); p = subprocess.run(cmd, capture_output=True, text=True); res[tool[0] + '_sec'] = round(time.time() - t_x, 1)
             files = [os.path.join(dp, f) for dp, _, fs in os.walk(out) for f in fs]
             res[tool[0]] = f'rc={p.returncode} files={len(files)} images={sum(f.lower().endswith(("jpg", "jpeg", "png", "webp")) for f in files)}'
+        res['disk_free_gb'] = round(shutil.disk_usage('/tmp').free / 1024 ** 3, 1)
         rec('full', 'download+unpack', d['complete'], **res)
     except Exception as e:
         rec('full', 'download+unpack', False, err=repr(e)[:200])
@@ -159,7 +162,7 @@ def run_gofile(slug, sess):
         if not kids: return rec('gofile', slug, False, step='contents', why='no files', body=c.text[:160])
         k = kids[0]; g.cookies.set('accountToken', tok, domain='.gofile.io')
         d = timed_get(g, k['link'], DL_CAP, headers={'Authorization': f'Bearer {tok}'})
-        rec('gofile', slug, d['status'] == 200 and d['bytes'] > 0, files=len(kids), name=k.get('name', '')[:40], size=k.get('size'), **d)
+        rec('gofile', slug, d['status'] == 200 and d['bytes'] > 0, files=len(kids), fname=k.get('name', '')[:40], size=k.get('size'), **d)
     except Exception as e:
         rec('gofile', slug, False, err=repr(e)[:200])
 
@@ -236,20 +239,22 @@ if __name__ == '__main__':
         rec('site', 'listing', bool(slugs), slugs=slugs)
     except Exception as e:
         rec('site', 'listing', False, err=repr(e)[:200]); slugs = []
+    ST = os.environ.get('STAGES', 'all').split(',')
+    on = lambda n: 'all' in ST or n in ST
     cands = []
-    for cycle in range(int(os.environ.get('CYCLES', '2'))):
-        for s in slugs: run_sorafolder(f'new/c{cycle}', s, S(), cands)
-        if cycle == 0:
-            for s in OLD_SORA: run_sorafolder('old', s, S(), cands)
-        time.sleep(20)
-    run_full(S(), cands)
-    for s in slugs[:2] + OLD_GOFILE: run_gofile(s, S())
-    for s in OLD_MEDIAFIRE: run_mediafire(s, S())
-    run_big('augusta-2')
-    for s in OTHER['terabox'].split(','): run_terabox(s)
-    for s in OTHER['traffic1s'].split(','): run_traffic1s(s)
-    for host, ss in OTHER.items():
-        if host != 'yandex': continue
-        for s in ss.split(','): run_other(host, s, S())
+    if on('sora'):
+        for cycle in range(int(os.environ.get('CYCLES', '2'))):
+            for s in slugs: run_sorafolder(f'new/c{cycle}', s, S(), cands)
+            if cycle == 0:
+                for s in OLD_SORA: run_sorafolder('old', s, S(), cands)
+            time.sleep(20)
+    if on('full'): run_full(S(), cands)
+    if on('gofile'):
+        for s in slugs[:2] + OLD_GOFILE: run_gofile(s, S())
+    if on('big'): run_big('augusta-2')
+    if on('other'):
+        for s in OLD_MEDIAFIRE: run_mediafire(s, S())
+        for s in OTHER['terabox'].split(','): run_terabox(s)
+        for s in OTHER['traffic1s'].split(','): run_traffic1s(s)
     json.dump(R, open('results.json', 'w'), indent=1, ensure_ascii=False)
     ok = sum(c['ok'] for c in R['checks']); print(f'\nSUMMARY {ok}/{len(R["checks"])} passed')

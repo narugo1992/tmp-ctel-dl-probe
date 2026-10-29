@@ -5,6 +5,12 @@ on:
       cycles:
         description: 'Repeat the new-post sorafolder probe this many times'
         default: '2'
+      stages:
+        description: 'Comma list of sora,full,gofile,big,other or all'
+        default: 'all'
+      full_slug:
+        description: 'Post whose sorafolder package is fully downloaded and unpacked'
+        default: ''
 # This job runs a third-party script fetched at run time (gofile's token generator), so it gets no
 # write access and keeps no credentials. The repository holds no secrets.
 permissions:
@@ -36,6 +42,8 @@ jobs:
       - name: Probe
         env:
           CYCLES: ${{ github.event.inputs.cycles || '2' }}
+          STAGES: ${{ github.event.inputs.stages || 'all' }}
+          FULL_SLUG: ${{ github.event.inputs.full_slug || '' }}
         run: python probe.py
       - uses: actions/upload-artifact@v4
         if: always()
