@@ -121,9 +121,10 @@ def run_sorafolder(label, slug, sess, full_candidates):
 def run_full(sess, cands):
     if not cands and not os.environ.get('FULL_SLUG'):
         return rec('full', 'smallest', False, why=f'no package under {FULL_MAX >> 20} MB found')
-    size, slug, pw = sorted(cands)[0]
     if os.environ.get('FULL_SLUG'):
-        slug = os.environ['FULL_SLUG']; pw = post_info(slug, sess)['password']
+        size, slug = 0, os.environ['FULL_SLUG']; pw = post_info(slug, sess)['password']
+    else:
+        size, slug, pw = sorted(cands)[0]
     work = '/tmp/ctel_full'; shutil.rmtree(work, ignore_errors=True); os.makedirs(work)
     try:
         m = sora_meta(sess, post_info(slug, sess)['links']['sorafolder'])
