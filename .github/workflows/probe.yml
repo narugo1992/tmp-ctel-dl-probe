@@ -1,0 +1,37 @@
+name: Download Probe
+on:
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: 'Repeat the new-post sorafolder probe this many times'
+        default: '2'
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tools
+        run: |
+          pip install cloudscraper pyquery lxml cryptography requests
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full unrar || sudo apt-get install -y -qq p7zip-full || true
+          (sudo apt-get install -y -qq 7zip || true)
+          which 7z 7zz unrar node || true
+          node -v
+      - name: Probe
+        env:
+          CYCLES: ${{ github.event.inputs.cycles || '2' }}
+        run: python probe.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.os }}
+          path: results.json
