@@ -5,6 +5,11 @@ on:
       cycles:
         description: 'Repeat the new-post sorafolder probe this many times'
         default: '2'
+# This job runs a third-party script fetched at run time (gofile's token generator), so it gets no
+# write access and keeps no credentials. The repository holds no secrets.
+permissions:
+  contents: read
+
 jobs:
   probe:
     strategy:
@@ -15,6 +20,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
