@@ -593,6 +593,33 @@ def stage_mega():
             rec('mega', 'full', id_, 'error', err=repr(e)[:160])
 
 
+def stage_bhx():
+    """buzzheavier from a runner with a range of browser TLS fingerprints, and terabox / vikingfile for the record."""
+    from curl_cffi import requests as cr
+    ids = json.load(open('ao_recent_ids.json'))[:6]
+    profiles = ['chrome124', 'chrome131', 'chrome120', 'safari17_0', 'safari18_0', 'firefox133', 'edge101']
+    for id_ in ids:
+        links, _ = tlinks(id_); url = links.get('buzzheavier')
+        if not url: continue
+        res = {}
+        for prof in profiles:
+            try:
+                r = cr.Session(impersonate=prof).get(url, timeout=30); res[prof] = r.status_code
+            except Exception as e:
+                res[prof] = type(e).__name__
+        s2 = S(); r2 = s2.get(url, headers={'Referer': 'https://buzzheavier.com/', 'Accept-Language': 'en-US,en;q=0.9'}); res['cloudscraper+headers'] = r2.status_code
+        rec('bhx', 'buzzheavier', id_, 'ok' if any(v == 200 for v in res.values()) else 'blocked', **res)
+    # terabox: what the runner is told
+    for id_ in ids[:3]:
+        links, _ = tlinks(id_); url = links.get('terabox')
+        if not url: continue
+        m = re.search(r'/(?:s|a-sl)/([\w-]+)', url)
+        if not m: continue
+        sess = S(); sess.get(url)
+        j = sess.get('https://www.terabox.com/api/shorturlinfo', params={'app_id': '250528', 'web': '1', 'channel': 'dubox', 'clienttype': '0', 'shorturl': m.group(1) if m.group(1).startswith('1') else '1' + m.group(1), 'root': '1'}).json()
+        rec('bhx', 'terabox', id_, 'info' if j.get('errno') == 0 else 'refused', errno=j.get('errno'), msg=str(j.get('show_msg') or j.get('errmsg') or '')[:60])
+
+
 
 if __name__ == '__main__':
     R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
@@ -626,7 +653,7 @@ if __name__ == '__main__':
                 run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
                 if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
     for st in stages:
-        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy', 'pw', 'pw2', 'mega'):
+        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy', 'pw', 'pw2', 'mega', 'bhx'):
             print('=== stage', st, flush=True); globals()['stage_' + st]()
     json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
     print('\n=== SUMMARY (group, host: statuses)')
