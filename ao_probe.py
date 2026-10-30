@@ -367,6 +367,67 @@ def stage_cffi():
                 rec('cffi', host, id_, 'error', err=repr(e)[:140])
 
 
+GD_GONE_WORDS = ('request access', 'you need access', 'sign in', 'not found', 'permission', 'does not exist')
+GD_QUOTA_WORDS = ('too many users', 'many accesses', 'quota exceeded', 'unusual traffic', 'download quota')
+
+
+def gd_url(endpoint, fid):
+    if endpoint == 'uc':  # the gdown-style path
+        return f'https://drive.google.com/uc?export=download&id={fid}'
+    return f'https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t'
+
+
+def gd_one(sess, endpoint, fid, cap, save=None):
+    t0 = time.time(); r = sess.get(gd_url(endpoint, fid), stream=True, timeout=(15, 60))
+    ctype = r.headers.get('Content-Type', '')
+    if r.status_code == 200 and not ctype.lower().startswith('text/html'):
+        n = 0; f = open(save, 'wb') if save else None
+        for c in r.iter_content(1 << 20):
+            n += len(c)
+            if f: f.write(c)
+            if cap and n >= cap or time.time() - t0 > 120: break
+        r.close()
+        if f: f.close()
+        dt = max(time.time() - t0, 1e-6)
+        return 'ok', {'bytes': n, 'length': int(r.headers.get('Content-Length') or 0), 'mbps': round(n / dt / 1024 ** 2, 1),
+                      'kind': 'zip' if ctype.startswith('application/zip') else ctype[:24], 'disp': bool(r.headers.get('Content-Disposition'))}
+    text = next(r.iter_content(6000), b'').decode('utf-8', 'replace').lower(); r.close()
+    if any(w in text for w in GD_QUOTA_WORDS): return 'quota', {'http': r.status_code}
+    if r.status_code in (401, 403, 404) or any(w in text for w in GD_GONE_WORDS): return 'gone', {'http': r.status_code}
+    return 'transient', {'http': r.status_code, 'ctype': ctype[:30], 'peek': text[:80]}
+
+
+def stage_gdrive():
+    endpoint = os.environ.get('GD_ENDPOINT', 'usercontent'); gap = float(os.environ.get('GD_GAP', '1.0'))
+    ids = json.load(open('ao_gd_ids.json')); sess = requests.Session(); sess.headers['User-Agent'] = MODERN_UA
+    fids = []
+    for id_ in ids:
+        url = tlinks(id_)[0].get('googledrive') or ''
+        m = re.search(r'/d/([\w-]+)', url)
+        if m and 'drive.google.com' in url: fids.append((id_, m.group(1)))
+    print('endpoint', endpoint, '| usable drive links', len(fids), flush=True)
+    order = fids + fids[:60]; seq = 0; full_done = False
+    for id_, fid in order:
+        seq += 1; time.sleep(gap)
+        try:
+            st, info = gd_one(sess, endpoint, fid, CAP)
+        except Exception as e:
+            st, info = 'error', {'err': repr(e)[:100]}
+        rec('gdrive', endpoint, id_, st, seq=seq, **info)
+        if st == 'quota': time.sleep(20)
+        if endpoint == 'usercontent' and st == 'ok' and not full_done and 20e6 < info.get('length', 0) < 600e6:
+            full_done = True; path = '/tmp/gd_full.zip'; time.sleep(gap)
+            st2, info2 = gd_one(sess, endpoint, fid, None, save=path)
+            pw = tlinks(id_)[1].get('unzip_password') if tlinks(id_)[1] else None
+            t = subprocess.run(['7z', 't', '-y', f'-p{(pw or "asiaon.top")}', path], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            lst = subprocess.run(['7z', 'l', '-slt', path], capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+            rec('gdfull', endpoint, id_, st2, **info2, pw=pw, test_rc=t.returncode, members=len(re.findall(r'^Path = ', lst, re.M)) - 1)
+            os.remove(path)
+
+
+MODERN_UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36')
+
+
 
 if __name__ == '__main__':
     R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
@@ -400,7 +461,7 @@ if __name__ == '__main__':
                 run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
                 if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
     for st in stages:
-        if st in ('scale', 'stab', 'full', 'cffi'):
+        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive'):
             print('=== stage', st, flush=True); globals()['stage_' + st]()
     json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
     print('\n=== SUMMARY (group, host: statuses)')
