@@ -428,6 +428,28 @@ def stage_gdrive():
 MODERN_UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36')
 
 
+def stage_heavy():
+    host = os.environ.get('HEAVY_HOST', 'pixeldrain'); budget = float(os.environ.get('HEAVY_GB', '8')) * 1024 ** 3
+    ids = json.load(open('ao_recent_ids.json')); total = 0; fails = 0; n = 0; t_start = time.time()
+    for id_ in ids:
+        if total >= budget or fails >= 6: break
+        links, _ = tlinks(id_)
+        if not links.get(host): continue
+        s, d, hdr, note = get_direct(host, links[host])
+        if not d:
+            fails += 1; rec('heavy', host, id_, 'fail', note=note, cum_gb=round(total / 1024 ** 3, 2)); continue
+        probe = s.get(d, stream=True, headers=hdr); length = int(probe.headers.get('Content-Length') or 0); code = probe.status_code; probe.close()
+        if code != 200: 
+            fails += 1; rec('heavy', host, id_, 'fail', http=code, cum_gb=round(total / 1024 ** 3, 2)); continue
+        if length > 1.6 * 1024 ** 3: continue
+        res = to_file(s, d, '/tmp/heavy.bin', hdr)
+        ok = res.get('bytes') and res.get('bytes') == res.get('length')
+        total += res.get('bytes') or 0; n += 1; fails = 0 if ok else fails + 1
+        rec('heavy', host, id_, 'ok' if ok else 'fail', **res, cum_gb=round(total / 1024 ** 3, 2), elapsed_min=round((time.time() - t_start) / 60, 1))
+        try: os.remove('/tmp/heavy.bin')
+        except OSError: pass
+
+
 
 if __name__ == '__main__':
     R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
@@ -461,7 +483,7 @@ if __name__ == '__main__':
                 run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
                 if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
     for st in stages:
-        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive'):
+        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy'):
             print('=== stage', st, flush=True); globals()['stage_' + st]()
     json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
     print('\n=== SUMMARY (group, host: statuses)')

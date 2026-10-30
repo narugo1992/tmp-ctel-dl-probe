@@ -2,11 +2,14 @@ name: Asiaon Download Probe
 on:
   workflow_dispatch:
     inputs:
+      heavy_host:
+        description: 'Host for the sustained download stage'
+        default: 'pixeldrain'
       gd_endpoint:
         description: 'usercontent or uc (the gdown-style path)'
         default: 'usercontent'
       stages:
-        description: 'Comma list of recent,old,scale,stab,full,cffi,gdrive'
+        description: 'Comma list of recent,old,scale,stab,full,cffi,gdrive,heavy'
         default: 'recent,old'
 # The probe runs third-party scripts fetched at run time (gofile's token generator), so it gets no
 # write access and keeps no credentials. The repository holds no secrets.
@@ -31,6 +34,8 @@ jobs:
         env:
           STAGES: ${{ github.event.inputs.stages || 'recent,old' }}
           THREADS: '8'
+          HEAVY_HOST: ${{ github.event.inputs.heavy_host || 'pixeldrain' }}
+          HEAVY_GB: '8'
           GD_ENDPOINT: ${{ github.event.inputs.gd_endpoint || 'usercontent' }}
         run: python -u ao_probe.py
       - uses: actions/upload-artifact@v4
