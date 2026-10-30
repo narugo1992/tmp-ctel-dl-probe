@@ -315,15 +315,16 @@ def stage_stab():
 
 def stage_full():
     ids = json.load(open('ao_recent_ids.json'))
+    want = os.environ.get('FULL_BAND', '100,400').split(','); lo, hi = int(want[0]) * 1e6, int(want[1]) * 1e6
     tried = 0
     for id_ in ids:
-        links, info = tlinks(id_); size = (info or {}).get('file_size_rough') or 0
-        want = os.environ.get('FULL_BAND', '100,400').split(','); lo, hi = int(want[0]) * 1e6, int(want[1]) * 1e6
-        if not (lo <= size <= hi): continue
+        links, info = tlinks(id_)
         for host in ('mediafire', 'pixeldrain'):
             if not links.get(host): continue
             s, d, hdr, note = get_direct(host, links[host])
             if not d: rec('full', host, id_, 'fail', note=note); continue
+            probe = s.get(d, stream=True, headers=hdr); length = int(probe.headers.get('Content-Length') or 0); probe.close()
+            if not (lo <= length <= hi): continue
             path = '/tmp/full.zip'; res = to_file(s, d, path, hdr)
             kind = open(path, 'rb').read(4) if os.path.exists(path) else b''
             pws = password_candidates((info or {}).get('unzip_password')); outcome = {}
@@ -332,10 +333,11 @@ def stage_full():
                 outcome[pw or '(none)'] = p.returncode
             lst = subprocess.run(['7z', 'l', '-slt', path], capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
             names = re.findall(r'^Path = (.+)$', lst, re.M)[1:]
-            rec('full', host, id_, 'ok' if res.get('bytes') and res.get('bytes') == res.get('length') else 'fail', **res, size_rough=size,
+            rec('full', host, id_, 'ok' if res.get('bytes') and res.get('bytes') == res.get('length') else 'fail', **res,
                 sig=kind.hex(), pw_in_page=(info or {}).get('unzip_password'), pw_candidates=pws, test_rc=outcome, members=len(names),
                 images=sum(n.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) for n in names), disk_free_gb=round(shutil.disk_usage('/tmp').free / 1024 ** 3, 1))
             os.remove(path); tried += 1
+            break
         if tried >= int(os.environ.get('FULL_N', '3')): break
 
 
