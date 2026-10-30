@@ -209,11 +209,169 @@ def run_one(group, host, ident, url, dl):
         rec(group, host, ident, 'error', err=repr(e)[:160])
 
 
+
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+_local = threading.local()
+
+
+def tclient():
+    if not hasattr(_local, 'c'):
+        _local.c = AOClient(session=get_asiaon_session()); _local.c.init()
+    return _local.c
+
+
+def tlinks(id_):
+    for attempt in range(3):
+        try:
+            info = tclient().get_info(id_); return info['download_urls'], info
+        except Exception as e:
+            time.sleep(2)
+    return {}, None
+
+
+def password_candidates(text):
+    out = []
+    for tok in re.findall(r'[A-Za-z0-9][\w.\-]*\.(?:top|com|net|org)', text or ''):
+        if tok not in out: out.append(tok)
+    if text and len(text) <= 24 and text not in out: out.append(text)
+    return out or ['asiaon.top', 'asiaontop.com']
+
+
+def mf_direct(url, tries=5):
+    last = None
+    for _ in range(tries):
+        s = S(); r = s.get(url); t = r.text
+        if 'downloadButton' in t:
+            scr = re.search(r'data-scrambled-url="([^"]+)"', t)
+            btn = re.search(r'id="downloadButton"[^>]*?href="([^"]+)"', t) or re.search(r'href="([^"]+)"[^>]*?id="downloadButton"', t)
+            return (base64.b64decode(scr.group(1)).decode() if scr else (btn.group(1) if btn else None)), s, _ + 1
+        last = (r.status_code, title(t))
+        if r.status_code == 404: break
+    return None, None, last
+
+
+def get_direct(host, url):
+    """-> (session, direct_url, extra_headers, note) for the hosts that can be fetched without a browser."""
+    if host == 'mediafire':
+        d, s, info = mf_direct(url); return (s, d, {}, f'attempts={info}') if d else (None, None, {}, f'no direct: {info}')
+    if host == 'pixeldrain':
+        m = re.search(r'pixeldrain\.com/(u|l)/([\w-]+)', url); s = S(); ident = m.group(2)
+        if m.group(1) == 'l':
+            ident = s.get(f'https://pixeldrain.com/api/list/{ident}').json()['files'][0]['id']
+        return s, f'https://pixeldrain.com/api/file/{ident}?download', {}, ''
+    return None, None, {}, 'unsupported'
+
+
+def to_file(s, url, path, headers=None, limit=None):
+    t0 = time.time(); r = s.get(url, stream=True, headers=headers or {}); n = 0
+    if r.status_code != 200: return {'http': r.status_code}
+    with open(path, 'wb') as f:
+        for c in r.iter_content(1 << 20):
+            f.write(c); n += len(c)
+            if limit and n >= limit: break
+    dt = max(time.time() - t0, 1e-6)
+    return {'http': 200, 'bytes': n, 'length': int(r.headers.get('Content-Length') or 0), 'sec': round(dt, 1), 'mbps': round(n / dt / 1024 ** 2, 1)}
+
+
+def stage_scale():
+    sample = json.load(open('ao_sample2.json')); jobs = [(h, i) for h, ids in sample.items() for i in ids]
+    random.Random(1).shuffle(jobs)
+    def work(job):
+        host, id_ = job; links, _ = tlinks(id_); url = links.get(host)
+        if not url: return host, id_, 'nolink', {}
+        try:
+            st, info = HANDLERS.get(host, chk_generic)(url, False); return host, id_, st, info
+        except Exception as e:
+            return host, id_, 'error', {'err': repr(e)[:100]}
+    done = 0
+    with ThreadPoolExecutor(int(os.environ.get('THREADS', '8'))) as ex:
+        for host, id_, st, info in ex.map(work, jobs):
+            R['checks'].append({'group': 'scale', 'host': host, 'id': id_, 'status': st, **info}); done += 1
+            if done % 200 == 0: print('scale progress', done, '/', len(jobs), flush=True)
+
+
+def stage_stab():
+    ids = json.load(open('ao_recent_ids.json'))
+    hosts = ['mediafire', 'pixeldrain']
+    got = defaultdict(int)
+    def work(id_):
+        links, info = tlinks(id_); out = []
+        for host in hosts:
+            if links.get(host) and got[host] < int(os.environ.get('STAB_N', '30')):
+                got[host] += 1
+                s, d, hdr, note = get_direct(host, links[host])
+                if not d: out.append((host, id_, 'fail', {'note': note})); continue
+                p = f'/tmp/stab_{threading.get_ident()}.bin'; res = to_file(s, d, p, hdr, limit=CAP)
+                out.append((host, id_, 'ok' if res.get('bytes') else 'fail', {**res, 'note': note, 'size_rough': info.get('file_size_rough') if info else None}))
+                try: os.remove(p)
+                except OSError: pass
+        return out
+    with ThreadPoolExecutor(3) as ex:
+        for out in ex.map(work, ids):
+            for host, id_, st, kw in out: rec('stab', host, id_, st, **kw)
+
+
+def stage_full():
+    ids = json.load(open('ao_recent_ids.json'))
+    tried = 0
+    for id_ in ids:
+        links, info = tlinks(id_); size = (info or {}).get('file_size_rough') or 0
+        want = os.environ.get('FULL_BAND', '100,400').split(','); lo, hi = int(want[0]) * 1e6, int(want[1]) * 1e6
+        if not (lo <= size <= hi): continue
+        for host in ('mediafire', 'pixeldrain'):
+            if not links.get(host): continue
+            s, d, hdr, note = get_direct(host, links[host])
+            if not d: rec('full', host, id_, 'fail', note=note); continue
+            path = '/tmp/full.zip'; res = to_file(s, d, path, hdr)
+            kind = open(path, 'rb').read(4) if os.path.exists(path) else b''
+            pws = password_candidates((info or {}).get('unzip_password')); outcome = {}
+            for pw in pws + [None]:
+                p = subprocess.run(['7z', 't', '-y', f'-p{pw or ""}', path], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                outcome[pw or '(none)'] = p.returncode
+            lst = subprocess.run(['7z', 'l', '-slt', path], capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+            names = re.findall(r'^Path = (.+)$', lst, re.M)[1:]
+            rec('full', host, id_, 'ok' if res.get('bytes') and res.get('bytes') == res.get('length') else 'fail', **res, size_rough=size,
+                sig=kind.hex(), pw_in_page=(info or {}).get('unzip_password'), pw_candidates=pws, test_rc=outcome, members=len(names),
+                images=sum(n.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) for n in names), disk_free_gb=round(shutil.disk_usage('/tmp').free / 1024 ** 3, 1))
+            os.remove(path); tried += 1
+        if tried >= int(os.environ.get('FULL_N', '3')): break
+
+
+def stage_cffi():
+    from curl_cffi import requests as cr
+    ids = json.load(open('ao_recent_ids.json'))[:12]
+    for id_ in ids:
+        links, _ = tlinks(id_)
+        for host in ('buzzheavier', 'mediafire'):
+            url = links.get(host)
+            if not url: continue
+            try:
+                s = cr.Session(impersonate='chrome124'); r = s.get(url, timeout=40)
+                info = {'http': r.status_code, 'title': title(r.text)}
+                if host == 'buzzheavier' and r.status_code == 200:
+                    ident = urlsplit(url).path.strip('/').split('/')[0]
+                    h = s.get(f'https://buzzheavier.com/{ident}/download', headers={'HX-Request': 'true', 'Referer': url}, allow_redirects=False, timeout=40)
+                    loc = h.headers.get('hx-redirect'); info['redirect'] = (loc or '')[:70]
+                    if loc:
+                        rr = s.get(loc if loc.startswith('http') else 'https://buzzheavier.com' + loc, stream=True, timeout=60); n = 0; t0 = time.time()
+                        for c in rr.iter_content(1 << 18):
+                            n += len(c)
+                            if n >= CAP or time.time() - t0 > 60: break
+                        info['dl'] = {'http': rr.status_code, 'bytes': n, 'mbps': round(n / max(time.time() - t0, 1e-6) / 1024 ** 2, 1)}
+                rec('cffi', host, id_, 'alive' if r.status_code == 200 else 'blocked', **info)
+            except Exception as e:
+                rec('cffi', host, id_, 'error', err=repr(e)[:140])
+
+
+
 if __name__ == '__main__':
     R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
     client = AOClient(session=get_asiaon_session()); client.init()
     downloaded = set()
     stages = os.environ.get('STAGES', 'recent,old').split(',')
+    if 'recent' not in stages and 'old' not in stages: pass
 
     def links(id_):
         try: return client.get_info(id_)['download_urls']
@@ -239,6 +397,9 @@ if __name__ == '__main__':
                 if not url: rec('old', host, id_, 'nolink'); continue
                 run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
                 if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
+    for st in stages:
+        if st in ('scale', 'stab', 'full', 'cffi'):
+            print('=== stage', st, flush=True); globals()['stage_' + st]()
     json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
     print('\n=== SUMMARY (group, host: statuses)')
     tab = defaultdict(Counter)
