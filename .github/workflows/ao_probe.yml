@@ -22,7 +22,7 @@ jobs:
           python-version: '3.11'
       - name: Install tools
         run: |
-          pip install cloudscraper pyquery lxml cryptography requests dateparser ditk hbutils random_user_agent curl_cffi
+          pip install cloudscraper pyquery lxml cryptography requests dateparser di-toolkit hbutils random_user_agent curl_cffi
       - name: Probe
         env:
           STAGES: ${{ github.event.inputs.stages || 'recent,old' }}
