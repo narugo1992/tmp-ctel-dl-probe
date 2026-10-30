@@ -524,6 +524,49 @@ def stage_pw():
             if not done: rec('pw', era, id_, 'skip', **out)
 
 
+def stage_pw2():
+    """Does the password stored in the index open the post's own archive? Tests the stored value as is, and the other readings."""
+    import pyzipper
+    rows = json.load(open('ao_pw2.json'))
+    def one(r):
+        id_, stored = r['id'], r['pw']
+        links, info = tlinks(id_)
+        out = {'month': r['month'], 'stored': (stored or '')[:60]}
+        for host in ('pixeldrain', 'mediafire'):
+            if not links.get(host): continue
+            try:
+                s, d, hdr, note = get_direct(host, links[host])
+                if not d: out[host] = str(note)[:50]; continue
+                size = total_size(s, d, hdr); local = None
+                if size:
+                    src = io.BufferedReader(RangeFile(s, d, size, hdr), buffer_size=1 << 20)
+                else:
+                    probe = s.get(d, stream=True, headers=hdr); length = int(probe.headers.get('Content-Length') or 0); probe.close()
+                    if not length or length > 400e6: out[host] = 'no range, too big'; continue
+                    local = f'/tmp/pw2_{threading.get_ident()}.zip'; to_file(s, d, local, hdr); src = open(local, 'rb')
+                zf = pyzipper.AESZipFile(src)
+                infos = [i for i in zf.infolist() if not i.is_dir()]; enc = [i for i in infos if i.flag_bits & 1]
+                comment = zf.comment.decode('utf-8', 'replace')
+                m = re.search(r'Password:\s*(\S+)', comment)
+                first = (re.findall(r'[A-Za-z0-9][\w.\-]*\.(?:top|com|net|org)', stored or '') or [None])[0]
+                readings = {'stored_verbatim': stored, 'stored_first_domain': first, 'asiaon.top': 'asiaon.top', 'asiaontop.com': 'asiaontop.com', 'zip_comment': m.group(1) if m else None}
+                works = {}
+                if enc:
+                    smallest = min(enc, key=lambda i: i.file_size)
+                    for label, pw in readings.items():
+                        if pw is None: works[label] = None; continue
+                        try: zf.setpassword(pw.encode()); zf.read(smallest.filename); works[label] = True
+                        except Exception: works[label] = False
+                if local and os.path.exists(local): os.remove(local)
+                return ('ok' if enc else 'noenc'), {**out, 'src': host, 'works': works, 'comment': comment[:70].replace('\r\n', ' | '), 'entries': len(infos), 'encrypted': len(enc)}
+            except Exception as e:
+                out[host] = repr(e)[:60]
+        return 'skip', out
+    with ThreadPoolExecutor(4) as ex:
+        for r, (st, info) in zip(rows, ex.map(one, rows)):
+            rec('pw2', r['era'], r['id'], st, **info)
+
+
 
 if __name__ == '__main__':
     R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
@@ -557,7 +600,7 @@ if __name__ == '__main__':
                 run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
                 if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
     for st in stages:
-        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy', 'pw'):
+        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy', 'pw', 'pw2'):
             print('=== stage', st, flush=True); globals()['stage_' + st]()
     json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
     print('\n=== SUMMARY (group, host: statuses)')
