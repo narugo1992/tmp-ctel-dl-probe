@@ -516,7 +516,7 @@ def stage_pw():
                                 zf.setpassword(c.encode()); zf.read(smallest.filename); ok.append(c)
                             except Exception:
                                 pass
-                    rec('pw', era, id_, 'ok' if (ok or not enc) else 'nopw', host=host, size_mb=round(size / 1e6), entries=len(infos), encrypted=len(enc),
+                    rec('pw', era, id_, 'ok' if (ok or not enc) else 'nopw', src=host, size_mb=round(size / 1e6), entries=len(infos), encrypted=len(enc),
                         methods=dict(methods), comment=comment[:120], works=ok, tried=cands[:5], ranges=rf.raw.requests, **out)
                     done = True; break
                 except Exception as e:
