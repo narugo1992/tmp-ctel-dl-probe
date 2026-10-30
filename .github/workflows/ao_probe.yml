@@ -9,7 +9,7 @@ on:
         description: 'usercontent or uc (the gdown-style path)'
         default: 'usercontent'
       stages:
-        description: 'Comma list of recent,old,scale,stab,full,cffi,gdrive,heavy,pw,pw2'
+        description: 'Comma list of recent,old,scale,stab,full,cffi,gdrive,heavy,pw,pw2,mega'
         default: 'recent,old'
 # The probe runs third-party scripts fetched at run time (gofile's token generator), so it gets no
 # write access and keeps no credentials. The repository holds no secrets.

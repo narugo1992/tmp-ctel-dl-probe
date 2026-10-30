@@ -567,6 +567,32 @@ def stage_pw2():
             rec('pw2', r['era'], r['id'], st, **info)
 
 
+def stage_mega():
+    """Whole-file download of the mega links found alive, decrypted as it streams, then checked with 7z."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    for id_ in json.load(open('ao_mega_ids.json')):
+        links, info = tlinks(id_); url = links.get('mega') or ''
+        m = re.search(r'mega\.nz/(?:file/)?#?!?([\w-]{8})[#!]([\w-]+)', url) or re.search(r'mega\.nz/file/([\w-]{8})#([\w-]+)', url)
+        if not m: rec('mega', 'full', id_, 'skip', url=url[:60]); continue
+        handle, key = m.groups()
+        try:
+            r = requests.post('https://g.api.mega.co.nz/cs', params={'id': random.randint(1, 10 ** 9)}, json=[{'a': 'g', 'g': 1, 'p': handle}], timeout=40).json()[0]
+            if isinstance(r, int): rec('mega', 'full', id_, 'dead', err=r); continue
+            k = struct.unpack('>8I', b64u(key)); aes = struct.pack('>4I', k[0] ^ k[4], k[1] ^ k[5], k[2] ^ k[6], k[3] ^ k[7]); iv = struct.pack('>4I', k[4], k[5], 0, 0)
+            dec = Cipher(algorithms.AES(aes), modes.CTR(iv)).decryptor(); path = '/tmp/mega_full.zip'; t0 = time.time(); n = 0
+            rr = requests.get(r['g'], stream=True, timeout=(15, 60))
+            with open(path, 'wb') as f:
+                for c in rr.iter_content(1 << 20):
+                    f.write(dec.update(c)); n += len(c)
+            dt = max(time.time() - t0, 1e-6)
+            pw = ((info or {}).get('unzip_password') or 'asiaon.top')
+            tr = subprocess.run(['7z', 't', '-y', f'-p{password_candidates(pw)[0]}', path], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            rec('mega', 'full', id_, 'ok' if n == r['s'] and tr.returncode == 0 else 'fail', http=rr.status_code, bytes=n, expected=r['s'], mbps=round(n / dt / 1024 ** 2, 1), test_rc=tr.returncode, sig=open(path, 'rb').read(4).hex())
+            os.remove(path)
+        except Exception as e:
+            rec('mega', 'full', id_, 'error', err=repr(e)[:160])
+
+
 
 if __name__ == '__main__':
     R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
@@ -600,7 +626,7 @@ if __name__ == '__main__':
                 run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
                 if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
     for st in stages:
-        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy', 'pw', 'pw2'):
+        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy', 'pw', 'pw2', 'mega'):
             print('=== stage', st, flush=True); globals()['stage_' + st]()
     json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
     print('\n=== SUMMARY (group, host: statuses)')
