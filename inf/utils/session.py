@@ -1,0 +1,199 @@
+import logging
+import random
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List, Union
+
+import requests
+from random_user_agent.params import SoftwareName, OperatingSystem
+from random_user_agent.user_agent import UserAgent
+from requests.adapters import HTTPAdapter, Retry
+from requests.exceptions import RequestException, TooManyRedirects
+
+DEFAULT_TIMEOUT = 60  # seconds
+
+#: Network errors worth retrying. ``curl_cffi`` sessions are drop-in for ``requests`` at the
+#: call site but not in their exception hierarchy: its error class is *also* named
+#: ``RequestException`` yet descends from ``OSError``, so a bare ``requests.RequestException``
+#: clause silently lets every curl_cffi network fault escape unretried. Imported softly so
+#: nothing here depends on curl_cffi being installed.
+_RETRYABLE_REQUEST_ERRORS: tuple = (RequestException,)
+try:
+    from curl_cffi.requests.errors import RequestsError as _CffiRequestsError
+
+    _RETRYABLE_REQUEST_ERRORS = (RequestException, _CffiRequestsError)
+except ImportError:  # pragma: no cover - curl_cffi is an optional transport
+    pass
+
+#: Public alias for callers that need to catch a request failure from either transport. Use
+#: this rather than ``requests.RequestException`` anywhere a curl_cffi session might be passed
+#: in, and read the status with ``getattr(getattr(err, 'response', None), 'status_code', None)``
+#: - a connection-level failure carries no response at all.
+REQUEST_ERRORS: tuple = _RETRYABLE_REQUEST_ERRORS
+
+
+class TimeoutHTTPAdapter(HTTPAdapter):
+    """
+    Custom HTTP adapter that sets a default timeout for requests.
+
+    Inherits from `HTTPAdapter`.
+
+    Usage:
+    - Create an instance of `TimeoutHTTPAdapter` and pass it to a `requests.Session` object's `mount` method.
+
+    Example:
+    ```python
+    session = requests.Session()
+    adapter = TimeoutHTTPAdapter(timeout=10)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    ```
+
+    :param timeout: The default timeout value in seconds. (default: 10)
+    :type timeout: int
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.timeout = DEFAULT_TIMEOUT
+        if "timeout" in kwargs:
+            self.timeout = kwargs["timeout"]
+            del kwargs["timeout"]
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        """
+        Sends a request with the provided timeout value.
+
+        :param request: The request to send.
+        :type request: PreparedRequest
+        :param kwargs: Additional keyword arguments.
+        :type kwargs: dict
+        :returns: The response from the request.
+        :rtype: Response
+        """
+        timeout = kwargs.get("timeout")
+        if timeout is None:
+            kwargs["timeout"] = self.timeout
+        return super().send(request, **kwargs)
+
+
+def get_requests_session(max_retries: int = 5, timeout: int = DEFAULT_TIMEOUT, verify: bool = True,
+                         headers: Optional[Dict[str, str]] = None, extra_retry_status_code: Optional[List[int]] = None,
+                         session: Optional[requests.Session] = None) \
+        -> requests.Session:
+    """
+    Returns a requests Session object configured with retry and timeout settings.
+
+    :param max_retries: The maximum number of retries. (default: 5)
+    :type max_retries: int
+    :param timeout: The default timeout value in seconds. (default: 10)
+    :type timeout: int
+    :param headers: Additional headers to be added to the session. (default: None)
+    :type headers: Optional[Dict[str, str]]
+    :param session: An existing requests Session object to use. If not provided, a new Session object is created. (default: None)
+    :type session: Optional[requests.Session]
+    :returns: The requests Session object.
+    :rtype: requests.Session
+    """
+    session = session or requests.session()
+    status_forcelist = [408, 413, 429, 500, 501, 502, 503, 504, 505, 506, 507, 509, 510, 511, 521]
+    status_forcelist = sorted({*status_forcelist, *(extra_retry_status_code or [])})
+    if extra_retry_status_code:
+        logging.info(f'Session established, status_forcelist: {status_forcelist!r}')
+    retries = Retry(
+        total=max_retries, backoff_factor=1,
+        status_forcelist=status_forcelist,
+        allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"],
+    )
+    adapter = TimeoutHTTPAdapter(max_retries=retries, timeout=timeout, pool_connections=32, pool_maxsize=32)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    session.headers.update({
+        "User-Agent": get_random_ua(),
+        **dict(headers or {}),
+    })
+    if not verify:
+        session.verify = False
+
+    return session
+
+
+def srequest(session: Union[requests.Session, List[requests.Session]], method, url, *, max_retries: int = 5,
+             sleep_time: float = 5.0, raise_for_status: bool = True, **kwargs) -> requests.Response:
+    """
+    Send a request using the provided session object with retry and timeout settings.
+
+    :param session: The requests Session object to use for the request.
+    :type session: requests.Session
+    :param method: The HTTP method for the request.
+    :type method: str
+    :param url: The URL for the request.
+    :type url: str
+    :param max_retries: The maximum number of retries. (default: 5)
+    :type max_retries: int
+    :param sleep_time: The sleep time between retries in seconds. (default: 5.0)
+    :type sleep_time: float
+    :param raise_for_status: Whether to raise an exception for non-successful response status codes. (default: True)
+    :type raise_for_status: bool
+    :param kwargs: Additional keyword arguments for the request.
+    :type kwargs: dict
+    :returns: The response from the request.
+    :rtype: requests.Response
+    """
+    resp = None
+    for attempt in range(max_retries):
+        current_sleep_time = sleep_time * (2 ** attempt)
+        if isinstance(session, (list, tuple)):
+            _session = random.choice(session)
+        else:
+            _session = session
+        try:
+            resp = _session.request(method, url, **kwargs)
+        except TooManyRedirects:
+            raise
+        except _RETRYABLE_REQUEST_ERRORS as err:
+            logging.warning(
+                f'Request error ({attempt + 1}/{max_retries}) for {method} {url!r} - {err!r}, '
+                f'sleep for {current_sleep_time:.1f}s.'
+            )
+            time.sleep(current_sleep_time)
+        else:
+            if resp.status_code // 100 == 5:
+                logging.warning(
+                    f'Request HTTP error ({attempt + 1}/{max_retries}) for {method} {url!r} - '
+                    f'{resp!r}, sleep for {current_sleep_time:.1f}s.'
+                )
+                time.sleep(current_sleep_time)
+            else:
+                break
+    assert resp is not None, f'Request failed for {max_retries} time(s).'
+    if raise_for_status:
+        resp.raise_for_status()
+
+    return resp
+
+
+@lru_cache()
+def _ua_pool():
+    software_names = [SoftwareName.CHROME.value, SoftwareName.FIREFOX.value, SoftwareName.EDGE.value]
+    operating_systems = [OperatingSystem.WINDOWS.value, OperatingSystem.MACOS.value]
+
+    user_agent_rotator = UserAgent(software_names=software_names, operating_systems=operating_systems, limit=1000)
+    return user_agent_rotator
+
+
+def get_random_ua():
+    return _ua_pool().get_random_user_agent()
+
+
+@lru_cache()
+def _ua_mobile_pool():
+    software_names = [SoftwareName.CHROME.value, SoftwareName.FIREFOX.value, SoftwareName.SAFARI.value]
+    operating_systems = [OperatingSystem.ANDROID.value, OperatingSystem.IOS.value]
+
+    user_agent_rotator = UserAgent(software_names=software_names, operating_systems=operating_systems, limit=1000)
+    return user_agent_rotator
+
+
+def get_random_mobile_ua():
+    return _ua_mobile_pool().get_random_user_agent()

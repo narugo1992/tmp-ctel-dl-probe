@@ -1,0 +1,246 @@
+"""Temporary CI probe for the hosts asiaon.top links to: which are alive, and which can be fetched direct.
+
+Read-only and capped: nothing is stored beyond a few megabytes per host, thrown away with the runner.
+"""
+import base64, json, os, random, re, shutil, struct, subprocess, sys, time
+from collections import Counter, defaultdict
+from urllib.parse import urlsplit
+
+import cloudscraper
+import requests
+
+sys.path.insert(0, os.getcwd())
+from inf.asiaon.client import AOClient, get_asiaon_session  # noqa: E402
+from inf.utils.session import get_random_ua  # noqa: E402
+
+CAP = int(os.environ.get('DL_CAP_MB', '24')) * 1024 ** 2
+R = {'checks': [], 'env': {}}
+SIG = {b'Rar!': 'rar', b'PK\x03\x04': 'zip', b'7z\xbc\xaf': '7z'}
+
+
+def S():
+    s = cloudscraper.session(); s.headers['User-Agent'] = get_random_ua()
+    s.request = (lambda f: lambda *a, **k: f(*a, **{'timeout': 40, **k}))(s.request)
+    return s
+
+
+def rec(group, host, ident, status, **kw):
+    R['checks'].append({'group': group, 'host': host, 'id': ident, 'status': status, **kw})
+    print(f'{status:8s} {group:7s} {host:12s} {ident[:34]:34s} {json.dumps(kw, ensure_ascii=False)[:230]}', flush=True)
+
+
+def title(text):
+    m = re.search(r'<title>(.*?)</title>', text, re.S | re.I)
+    return re.sub(r'\s+', ' ', m.group(1)).strip()[:70] if m else None
+
+
+def timed(sess, url, cap=CAP, **kw):
+    t0 = time.time(); r = sess.get(url, stream=True, **kw)
+    out = {'http': r.status_code, 'length': int(r.headers.get('Content-Length') or 0), 'ctype': r.headers.get('Content-Type', '')[:30]}
+    if r.status_code not in (200, 206):
+        r.close(); return out
+    n, first = 0, b''
+    for c in r.iter_content(1 << 18):
+        first = first or c[:8]; n += len(c)
+        if n >= cap or time.time() - t0 > 90: break
+    r.close(); dt = max(time.time() - t0, 1e-6)
+    out.update(bytes=n, mbps=round(n / dt / 1024 ** 2, 1), kind=next((v for k, v in SIG.items() if first.startswith(k)), first[:6].hex()))
+    return out
+
+
+# ---------------------------------------------------------------- per-host liveness (+ partial download)
+def chk_mediafire(url, dl):
+    s = S(); r = s.get(url); t = r.text
+    if 'downloadButton' not in t:
+        return ('dead' if r.status_code == 404 or re.search(r'Invalid or Deleted|dangerous file|violat', t, re.I) else 'unknown'), {'http': r.status_code, 'title': title(t)}
+    if not dl: return 'alive', {}
+    btn = re.search(r'id="downloadButton"[^>]*?href="([^"]+)"', t) or re.search(r'href="([^"]+)"[^>]*?id="downloadButton"', t)
+    scr = re.search(r'data-scrambled-url="([^"]+)"', t)
+    direct = base64.b64decode(scr.group(1)).decode() if scr else (btn.group(1) if btn else None)
+    return 'alive', {'dl': timed(s, direct) if direct else 'no direct link'}
+
+
+def chk_pixeldrain(url, dl):
+    m = re.search(r'pixeldrain\.com/(u|l)/([\w-]+)', url)
+    if not m: return 'unknown', {'why': 'url shape'}
+    kind, ident = m.groups(); s = S()
+    r = s.get(f'https://pixeldrain.com/api/{"file" if kind == "u" else "list"}/{ident}' + ('/info' if kind == 'u' else ''))
+    if r.status_code == 404: return 'dead', {}
+    if r.status_code != 200: return 'unknown', {'http': r.status_code, 'body': r.text[:80]}
+    j = r.json(); info = {'size': j.get('size') or sum(f.get('size', 0) for f in j.get('files', [])), 'avail': j.get('availability')}
+    if not dl: return 'alive', info
+    fid = ident if kind == 'u' else j['files'][0]['id']
+    return 'alive', {**info, 'dl': timed(s, f'https://pixeldrain.com/api/file/{fid}?download')}
+
+
+def chk_buzzheavier(url, dl):
+    ident = urlsplit(url).path.strip('/').split('/')[0]; s = S(); r = s.get(f'https://buzzheavier.com/{ident}')
+    if r.status_code == 404 or re.search(r'not found|does not exist|removed|deleted', r.text[:6000], re.I) and r.status_code != 200: return 'dead', {'http': r.status_code}
+    if r.status_code != 200: return 'unknown', {'http': r.status_code}
+    if not dl: return 'alive', {'title': title(r.text)}
+    h = s.get(f'https://buzzheavier.com/{ident}/download', headers={'HX-Request': 'true', 'Referer': f'https://buzzheavier.com/{ident}'}, allow_redirects=False)
+    loc = h.headers.get('hx-redirect') or h.headers.get('Location')
+    return 'alive', {'title': title(r.text), 'redirect': (loc or '')[:60], 'dl': timed(s, loc if loc.startswith('http') else f'https://buzzheavier.com{loc}') if loc else {'http': h.status_code}}
+
+
+def chk_vikingfile(url, dl):
+    s = S(); r = s.get(url); t = r.text
+    scripts = re.findall(r'src="([^"]+\.js[^"]*)"', t)[:3]; apis = sorted(set(re.findall(r'["\'](/api/[\w/\-]+)', t)))[:5]
+    st = 'dead' if re.search(r'not found|doesn.t exist|deleted|removed', t[:8000], re.I) and r.status_code != 200 else ('alive' if r.status_code == 200 else 'unknown')
+    return st, {'http': r.status_code, 'title': title(t), 'len': len(t), 'scripts': scripts, 'apis': apis, 'snippet': re.sub(r'\s+', ' ', re.sub(r'<script.*?</script>|<style.*?</style>', '', t, flags=re.S))[:200]}
+
+
+def chk_terabox(url, dl):
+    m = re.search(r'/(?:s|a-sl)/([\w-]+)', url)
+    if not m: return 'unknown', {'why': 'url shape'}
+    s = S(); sid = m.group(1); s.get(url)
+    j = s.get('https://www.terabox.com/api/shorturlinfo', params={'app_id': '250528', 'web': '1', 'channel': 'dubox', 'clienttype': '0', 'shorturl': sid if sid.startswith('1') else '1' + sid, 'root': '1'}).json()
+    return ('alive' if j.get('errno') == 0 else 'dead'), {'errno': j.get('errno'), 'files': len(j.get('list', []) or [])}
+
+
+def b64u(x): return base64.urlsafe_b64decode(x + '=' * (-len(x) % 4))
+
+
+def chk_mega(url, dl):
+    m = re.search(r'mega\.nz/(?:file/|folder/|embed/)([\w-]{8})#([\w-]+)', url) or re.search(r'mega\.nz/#(F?)!([\w-]{8})!([\w-]+)', url)
+    if not m: return 'unknown', {'why': 'url shape'}
+    g = m.groups(); folder = '/folder/' in url or url.split('#')[1].startswith('F')
+    handle, key = (g[0], g[1]) if len(g) == 2 else (g[1], g[2])
+    for attempt in range(4):
+        if folder:
+            r = requests.post('https://g.api.mega.co.nz/cs', params={'id': random.randint(1, 10 ** 9), 'n': handle}, json=[{'a': 'f', 'c': 1, 'r': 1}], timeout=40)
+        else:
+            r = requests.post('https://g.api.mega.co.nz/cs', params={'id': random.randint(1, 10 ** 9)}, json=[{'a': 'g', 'g': 1, 'p': handle}], timeout=40)
+        j = r.json()
+        if j == -3 or j == [-3]: time.sleep(3); continue
+        break
+    j = j[0] if isinstance(j, list) else j
+    if isinstance(j, int): return ('dead' if j in (-9, -16, -11, -8, -2) else 'unknown'), {'mega_err': j}
+    if folder: return ('alive' if j.get('f') else 'dead'), {'nodes': len(j.get('f', []))}
+    info = {'size': j.get('s'), 'has_url': bool(j.get('g'))}
+    if not dl or not j.get('g'): return 'alive', info
+    try:  # decrypt the first MiB with the key from the link, to prove the stream is usable
+        k = struct.unpack('>8I', b64u(key)); aes = struct.pack('>4I', k[0] ^ k[4], k[1] ^ k[5], k[2] ^ k[6], k[3] ^ k[7])
+        iv = struct.pack('>4I', k[4], k[5], 0, 0)
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        t0 = time.time(); rr = requests.get(j['g'] + '/0-' + str(CAP - 1), stream=True, timeout=60); buf = b''
+        for c in rr.iter_content(1 << 18):
+            buf += c
+            if len(buf) >= CAP or time.time() - t0 > 90: break
+        plain = Cipher(algorithms.AES(aes), modes.CTR(iv)).decryptor().update(buf)
+        info['dl'] = {'http': rr.status_code, 'bytes': len(buf), 'mbps': round(len(buf) / max(time.time() - t0, 1e-6) / 1024 ** 2, 1), 'kind': next((v for kk, v in SIG.items() if plain.startswith(kk)), plain[:6].hex())}
+    except Exception as e:
+        info['dl'] = {'err': repr(e)[:120]}
+    return 'alive', info
+
+
+def chk_googledrive(url, dl):
+    m = re.search(r'/d/([\w-]+)', url) or re.search(r'[?&]id=([\w-]+)', url)
+    if 'drive.google.com' not in url or not m: return 'unknown', {'why': 'not a drive link', 'host': urlsplit(url).hostname}
+    s = requests.Session(); s.headers['User-Agent'] = get_random_ua()
+    r = s.get('https://drive.google.com/uc', params={'export': 'download', 'id': m.group(1)}, stream=True, timeout=40, allow_redirects=True)
+    cd = r.headers.get('Content-Disposition'); t = '' if cd else r.text[:6000]
+    if cd: 
+        out = {'http': r.status_code, 'direct': True}
+        if dl:
+            n, t0 = 0, time.time()
+            for c in r.iter_content(1 << 18):
+                n += len(c)
+                if n >= CAP or time.time() - t0 > 90: break
+            out['dl'] = {'bytes': n, 'mbps': round(n / max(time.time() - t0, 1e-6) / 1024 ** 2, 1)}
+        r.close(); return 'alive', out
+    r.close()
+    if r.status_code == 404 or re.search(r'does not exist|Sorry, the file you have requested', t): return 'dead', {'http': r.status_code}
+    if 'accounts.google.com' in r.url: return 'dead', {'why': 'private (login required)'}
+    if re.search(r'Quota exceeded|too many users|download quota', t, re.I): return 'quota', {}
+    if re.search(r'virus scan|confirm=|Download anyway', t, re.I): return 'alive', {'note': 'large file, confirm page'}
+    return 'unknown', {'http': r.status_code, 'title': title(t)}
+
+
+def chk_generic(url, dl):
+    s = S()
+    try:
+        r = s.get(url, allow_redirects=True); t = r.text[:20000]
+    except Exception as e:
+        return 'error', {'err': type(e).__name__, 'msg': str(e)[:90]}
+    gone = bool(re.search(r'not found|no longer|deleted|removed|does not exist|expired|invalid|suspended|unavailable|404', t[:6000], re.I))
+    ttl = title(t)
+    st = 'dead' if r.status_code in (404, 410) or (gone and r.status_code == 200 and not re.search(r'download', t[:3000], re.I)) else ('alive' if r.status_code == 200 else 'unknown')
+    return st, {'http': r.status_code, 'final': urlsplit(r.url).hostname, 'title': ttl, 'len': len(t)}
+
+
+GF = {'tok': None, 'wt': None, 'sess': None}
+
+
+def chk_gofile(url, dl):
+    ident = urlsplit(url).path.strip('/').split('/')[-1]
+    if GF['tok'] is None:
+        open('wt.obf.js', 'w').write(S().get('https://gofile.io/js/wt.obf.js').text)
+        g = S(); a = g.post('https://api.gofile.io/accounts')
+        if a.status_code != 200: return 'unknown', {'step': 'account', 'http': a.status_code}
+        GF.update(tok=a.json()['data']['token'], sess=g)
+        GF['wt'] = subprocess.run(['node', 'gf_wt.mjs', GF['tok'], g.headers['User-Agent']], capture_output=True, text=True, timeout=60).stdout.strip()
+    g = GF['sess']
+    c = g.get(f'https://api.gofile.io/contents/{ident}', headers={'Authorization': f'Bearer {GF["tok"]}', 'X-Website-Token': GF['wt'], 'X-BL': 'en-US'})
+    if c.status_code == 404 or '"error-notFound"' in c.text: return 'dead', {'http': c.status_code}
+    if c.status_code != 200: return 'unknown', {'http': c.status_code, 'body': c.text[:80]}
+    kids = [k for k in c.json()['data'].get('children', {}).values() if k.get('type') == 'file']
+    if not kids: return 'dead', {'why': 'empty'}
+    info = {'files': len(kids), 'bytes_total': sum(k.get('size', 0) for k in kids)}
+    if dl:
+        g.cookies.set('accountToken', GF['tok'], domain='.gofile.io')
+        info['dl'] = timed(g, kids[0]['link'], headers={'Authorization': f'Bearer {GF["tok"]}'})
+    return 'alive', info
+
+
+HANDLERS = {'mediafire': chk_mediafire, 'pixeldrain': chk_pixeldrain, 'buzzheavier': chk_buzzheavier, 'vikingfile': chk_vikingfile,
+            'terabox': chk_terabox, 'mega': chk_mega, 'googledrive': chk_googledrive, 'gofile': chk_gofile}
+
+
+def host_of(key):
+    return {'bayfiles': 'bayfile', 'anonfile': 'anonfile', 'annofile': 'annon'}.get(key, key)
+
+
+def run_one(group, host, ident, url, dl):
+    try:
+        st, info = HANDLERS.get(host, chk_generic)(url, dl)
+        rec(group, host, ident, st, **info)
+    except Exception as e:
+        rec(group, host, ident, 'error', err=repr(e)[:160])
+
+
+if __name__ == '__main__':
+    R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
+    client = AOClient(session=get_asiaon_session()); client.init()
+    downloaded = set()
+    stages = os.environ.get('STAGES', 'recent,old').split(',')
+
+    def links(id_):
+        try: return client.get_info(id_)['download_urls']
+        except Exception as e:
+            print('detail fail', id_[:30], repr(e)[:80]); return {}
+
+    if 'recent' in stages:
+        ids = []
+        for page in (1, 2, 3, 40, 80):
+            try: ids += [(page, i['id']) for i in client.get_lst_page(page)]
+            except Exception as e: print('list fail', page, repr(e)[:80])
+        for page, id_ in ids:
+            for key, url in links(id_).items():
+                host = host_of(key)
+                if host in HANDLERS or host in ('rapidgator',):
+                    run_one(f'new{page}', host, id_, url, dl=(host not in downloaded and host in HANDLERS and host != 'terabox'))
+                    if host in HANDLERS: downloaded.add(host) if R['checks'][-1]['status'] == 'alive' else None
+    if 'old' in stages:
+        sample = json.load(open('ao_sample.json'))
+        for host, id_list in sample.items():
+            for id_ in id_list:
+                url = links(id_).get(host) or links(id_).get({'bayfile': 'bayfile', 'annon': 'annon'}.get(host, host))
+                if not url: rec('old', host, id_, 'nolink'); continue
+                run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
+                if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
+    json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
+    print('\n=== SUMMARY (group, host: statuses)')
+    tab = defaultdict(Counter)
+    for c in R['checks']: tab[(c['group'].rstrip('0123456789'), c['host'])][c['status']] += 1
+    for k in sorted(tab): print(k, dict(tab[k]))

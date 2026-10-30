@@ -1,0 +1,34 @@
+name: Asiaon Download Probe
+on:
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: 'Comma list of recent,old'
+        default: 'recent,old'
+# The probe runs third-party scripts fetched at run time (gofile's token generator), so it gets no
+# write access and keeps no credentials. The repository holds no secrets.
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tools
+        run: |
+          pip install cloudscraper pyquery lxml cryptography requests dateparser ditk hbutils random_user_agent curl_cffi
+      - name: Probe
+        env:
+          STAGES: ${{ github.event.inputs.stages || 'recent,old' }}
+        run: python -u ao_probe.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ao-results
+          path: ao_results.json
