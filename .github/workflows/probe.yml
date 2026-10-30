@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-22.04]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -33,7 +33,7 @@ jobs:
           python-version: '3.11'
       - name: Install tools
         run: |
-          pip install cloudscraper pyquery lxml cryptography requests
+          pip install cloudscraper pyquery lxml cryptography requests rarfile
           sudo apt-get update -qq
           sudo apt-get install -y -qq p7zip-full unrar || sudo apt-get install -y -qq p7zip-full || true
           (sudo apt-get install -y -qq 7zip || true)

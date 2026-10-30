@@ -39,7 +39,7 @@ def S():
 def rec(kind, name, ok, **kw):
     item = {'kind': kind, 'name': name, 'ok': bool(ok), **kw}
     R['checks'].append(item)
-    print(('PASS ' if ok else 'FAIL ') + f'{kind:10s} {name:34s} ' + json.dumps(kw, ensure_ascii=False)[:300], flush=True)
+    print(('PASS ' if ok else 'FAIL ') + f'{kind:10s} {name:34s} ' + json.dumps(kw, ensure_ascii=False)[:1200], flush=True)
 
 
 def post_info(slug, sess):
@@ -227,6 +227,48 @@ def run_traffic1s(slug):
         rec('traffic1s', slug, False, err=repr(e)[:200])
 
 
+def run_dbg(slug):
+    """Download one package and list it with every available tool, to see which ones cope."""
+    import glob
+    try:
+        sess = S(); info = post_info(slug, sess); m = sora_meta(sess, info['links']['sorafolder'])
+        work = f'/tmp/dbg_{slug}'; shutil.rmtree(work, ignore_errors=True); os.makedirs(work)
+        rar = os.path.join(work, 'p.rar'); d = timed_get(sess, m['url'], 1 << 40, save=rar)
+        pw = info['password']
+        res = {'size': d['bytes'], 'complete': d['complete'], 'sig': open(rar, 'rb').read(8).hex(), 'pw': bool(pw)}
+        tools = {
+            '7z': ['7z', 'l', '-slt', '-y'] + ([f'-p{pw}'] if pw else []) + [rar],
+            '7zz': ['7zz', 'l', '-slt', '-y'] + ([f'-p{pw}'] if pw else []) + [rar],
+            'unrar_lt': ['unrar', 'lt', '-y'] + ([f'-p{pw}'] if pw else ['-p-']) + [rar],
+        }
+        for name, cmd in tools.items():
+            if not shutil.which(cmd[0]): res[name] = 'missing'; continue
+            rcs = []
+            for _ in range(3):
+                p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=900)
+                rcs.append(p.returncode)
+            res[name] = {'rc': rcs, 'lines': len(p.stdout.splitlines()), 'stderr': p.stderr.strip()[:160]}
+        try:
+            import rarfile
+            rf = rarfile.RarFile(rar)
+            if pw: rf.setpassword(pw)
+            infos = rf.infolist()
+            res['rarfile'] = {'n': len(infos), 'symlinks': sum(i.is_symlink() for i in infos), 'dirs': sum(i.is_dir() for i in infos), 'tool': str(getattr(rarfile, 'UNRAR_TOOL', ''))}
+        except Exception as e:
+            res['rarfile'] = repr(e)[:200]
+        out = os.path.join(work, 'x'); os.makedirs(out)
+        p = subprocess.run(['unrar', 'x', '-y', f'-p{pw or "-"}', rar, out + '/'], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1800)
+        files = [f for f in glob.glob(out + '/**', recursive=True) if os.path.isfile(f)]
+        res['unrar_x'] = {'rc': p.returncode, 'files': len(files)}
+        p = subprocess.run(['7z', 'x', '-y', f'-p{pw or ""}', f'-o{out}_7z', rar], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1800)
+        res['7z_x_rc'] = p.returncode
+        res['versions'] = {t: (subprocess.run([t, '--help' if t == '7z' else '-h'], capture_output=True, text=True).stdout.splitlines() or [''])[0:2] for t in ('7z', '7zz') if shutil.which(t)}
+        rec('dbg', slug, True, **res)
+        shutil.rmtree(work, ignore_errors=True)
+    except Exception as e:
+        rec('dbg', slug, False, err=repr(e)[:300])
+
+
 if __name__ == '__main__':
     R['env']['runner'] = os.environ.get('RUNNER_NAME', '')
     R['env']['ip'] = S().get('https://api.ipify.org').text
@@ -252,6 +294,8 @@ if __name__ == '__main__':
     if on('full'): run_full(S(), cands)
     if on('gofile'):
         for s in slugs[:2] + OLD_GOFILE: run_gofile(s, S())
+    if on('dbg'):
+        for s in os.environ.get('DBG_SLUGS', 'marin-kitagawa-39,fubuki-9,tayama-yamada').split(','): run_dbg(s)
     if on('big'): run_big('augusta-2')
     if on('other'):
         for s in OLD_MEDIAFIRE: run_mediafire(s, S())
