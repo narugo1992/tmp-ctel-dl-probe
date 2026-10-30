@@ -9,7 +9,7 @@ on:
         description: 'usercontent or uc (the gdown-style path)'
         default: 'usercontent'
       stages:
-        description: 'Comma list of recent,old,scale,stab,full,cffi,gdrive,heavy'
+        description: 'Comma list of recent,old,scale,stab,full,cffi,gdrive,heavy,pw'
         default: 'recent,old'
 # The probe runs third-party scripts fetched at run time (gofile's token generator), so it gets no
 # write access and keeps no credentials. The repository holds no secrets.
@@ -29,7 +29,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full || true
-          pip install cloudscraper pyquery lxml cryptography requests dateparser di-toolkit hbutils random_user_agent curl_cffi
+          pip install pyzipper cloudscraper pyquery lxml cryptography requests dateparser di-toolkit hbutils random_user_agent curl_cffi
       - name: Probe
         env:
           STAGES: ${{ github.event.inputs.stages || 'recent,old' }}

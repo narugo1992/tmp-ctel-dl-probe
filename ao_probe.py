@@ -450,6 +450,80 @@ def stage_heavy():
         except OSError: pass
 
 
+import io
+
+
+class RangeFile(io.RawIOBase):
+    """A read-only seekable file over HTTP range requests, so a zip's directory and one member can be read
+    without downloading the archive."""
+
+    def __init__(self, sess, url, size, headers=None):
+        self.sess, self.url, self.size, self.headers, self.pos, self.requests = sess, url, size, dict(headers or {}), 0, 0
+
+    def readable(self): return True
+    def seekable(self): return True
+    def tell(self): return self.pos
+
+    def seek(self, off, whence=0):
+        self.pos = {0: off, 1: self.pos + off, 2: self.size + off}[whence]
+        return self.pos
+
+    def readinto(self, b):
+        if self.pos >= self.size: return 0
+        end = min(self.pos + len(b), self.size) - 1
+        r = self.sess.get(self.url, headers={**self.headers, 'Range': f'bytes={self.pos}-{end}'}, timeout=90)
+        if r.status_code != 206: raise IOError(f'range request answered {r.status_code}')
+        data = r.content; b[:len(data)] = data; self.pos += len(data); self.requests += 1
+        return len(data)
+
+
+def total_size(sess, url, headers):
+    r = sess.get(url, headers={**headers, 'Range': 'bytes=0-0'}, stream=True)
+    cr = r.headers.get('Content-Range', ''); r.close()
+    return int(cr.split('/')[-1]) if '/' in cr and cr.split('/')[-1].isdigit() else None
+
+
+def stage_pw():
+    import pyzipper
+    groups = json.load(open('ao_pw_ids.json'))
+    for era, ids in groups.items():
+        for id_ in ids:
+            links, info = tlinks(id_)
+            page_pw = (info or {}).get('unzip_password')
+            out = {'page': (page_pw or '')[:70]}
+            done = False
+            for host in ('pixeldrain', 'mediafire'):
+                if not links.get(host): continue
+                try:
+                    s, d, hdr, note = get_direct(host, links[host])
+                    if not d: out[host] = note; continue
+                    size = total_size(s, d, hdr)
+                    if not size: out[host] = 'no range support'; continue
+                    rf = io.BufferedReader(RangeFile(s, d, size, hdr), buffer_size=1 << 20)
+                    zf = pyzipper.AESZipFile(rf)
+                    infos = [i for i in zf.infolist() if not i.is_dir()]
+                    enc = [i for i in infos if i.flag_bits & 1]
+                    methods = Counter('AES' if i.compress_type == 99 else 'ZipCrypto' for i in enc)
+                    comment = zf.comment.decode('utf-8', 'replace')
+                    cands = []
+                    for c in ['asiaontop.com', 'asiaon.top', *re.findall(r'[A-Za-z0-9][\w.\-]*\.(?:top|com|net|org)', comment), comment.strip()]:
+                        if c and c not in cands and len(c) <= 80: cands.append(c)
+                    ok = []
+                    if enc:
+                        smallest = min(enc, key=lambda i: i.file_size)
+                        for c in cands:
+                            try:
+                                zf.setpassword(c.encode()); zf.read(smallest.filename); ok.append(c)
+                            except Exception:
+                                pass
+                    rec('pw', era, id_, 'ok' if (ok or not enc) else 'nopw', host=host, size_mb=round(size / 1e6), entries=len(infos), encrypted=len(enc),
+                        methods=dict(methods), comment=comment[:120], works=ok, tried=cands[:5], ranges=rf.raw.requests, **out)
+                    done = True; break
+                except Exception as e:
+                    out[host] = repr(e)[:80]
+            if not done: rec('pw', era, id_, 'skip', **out)
+
+
 
 if __name__ == '__main__':
     R['env']['ip'] = S().get('https://api.ipify.org').text; print('egress ip', R['env']['ip'], flush=True)
@@ -483,7 +557,7 @@ if __name__ == '__main__':
                 run_one('old', host, id_, url, dl=(host + ':old' not in downloaded and host in HANDLERS and host != 'terabox'))
                 if R['checks'][-1]['status'] == 'alive' and host in HANDLERS: downloaded.add(host + ':old')
     for st in stages:
-        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy'):
+        if st in ('scale', 'stab', 'full', 'cffi', 'gdrive', 'heavy', 'pw'):
             print('=== stage', st, flush=True); globals()['stage_' + st]()
     json.dump(R, open('ao_results.json', 'w'), indent=1, ensure_ascii=False)
     print('\n=== SUMMARY (group, host: statuses)')
