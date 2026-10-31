@@ -205,6 +205,87 @@ def probe_gofile():
         log(f'GF-DONE {sname}')
 
 
+# ------------------------------------------------- mediafire, as the job asks
+def probe_mediafire_job():
+    """The job's own session and page request, one after another and then in parallel, to see when 403 begins."""
+    from concurrent.futures import ThreadPoolExecutor
+    from inf.asiaon.hosts.base import get, get_download_session
+    urls = T['mediafire']
+
+    def one(i):
+        t0 = time.time()
+        try:
+            r = get(get_download_session(), urls[i % len(urls)])
+            return {'i': i, 'http': r.status_code, 'button': 'downloadButton' in r.text, 's': round(time.time() - t0, 1),
+                    'mitig': r.headers.get('cf-mitigated')}
+        except Exception as err:
+            return {'i': i, 'err': f'{type(err).__name__}: {snippet(str(err), 80)}', 's': round(time.time() - t0, 1)}
+
+    seq = []
+    for i in range(40):
+        seq.append(one(i))
+        time.sleep(0.5)
+    log('MFJOB-SEQ', json.dumps([(r['i'], r.get('http'), r.get('button')) for r in seq]))
+    with ThreadPoolExecutor(8) as pool:
+        par = list(pool.map(one, range(40, 120)))
+    log('MFJOB-PAR8', json.dumps([(r['i'], r.get('http'), r.get('button')) for r in par]))
+    for name, rows in (('seq', seq), ('par8', par)):
+        bad = [r['i'] for r in rows if not r.get('button')]
+        R['mf'].append({'job': name, 'requests': len(rows), 'without_button': len(bad), 'first_bad': bad[:1]})
+        log(f'MFJOB-SUMMARY {name}: {len(rows) - len(bad)}/{len(rows)} pages with a button, first bad at {bad[:3]}')
+
+
+# ---------------------------------------------------------- gofile, as the job asks
+def probe_gofile_job():
+    """The job's own gofile calls: how fast guest accounts may be made, and how much one account may download."""
+    from inf.asiaon.hosts.base import get_plain_session
+    sess = get_plain_session()
+    for delay in (0, 15, 45):
+        time.sleep(delay)
+        r = sess.post('https://api.gofile.io/accounts', timeout=30)
+        hdr = {k: v for k, v in r.headers.items() if k.lower().startswith(('retry-after', 'x-ratelimit', 'cf-'))}
+        rec = {'account_after_s': delay, 'http': r.status_code, 'hdr': hdr, 'body': snippet(r.text, 120)}
+        R['gf'].append(rec)
+        log('GFJOB-ACCT', json.dumps(rec))
+        if r.status_code == 200:
+            break
+    token, wt = gofile._credentials(sess)
+    log('GFJOB-CRED', 'token ok' if token else 'no token', 'wt ok' if wt else 'no wt')
+    total, started = 0, time.time()
+    for url in T['gofile']:
+        ident = re.search(r'gofile\.io/d/([\w-]+)', url).group(1)
+        rec = {'folder': ident}
+        try:
+            token, data = gofile._contents(sess, ident)
+            files = [x for x in (data.get('children') or {}).values() if x.get('type') == 'file']
+            rec['files'] = len(files)
+            if not files:
+                raise RuntimeError('no files')
+            item = files[0]
+            rec.update(name=item.get('name', '')[:30], size_mb=round((item.get('size') or 0) / 1e6))
+            sess.cookies.set('accountToken', token, domain='.gofile.io')
+            resp = sess.get(item['link'], headers={'Authorization': f'Bearer {token}'}, stream=True, timeout=60)
+            rec['http'] = resp.status_code
+            if resp.status_code != 200:
+                rec['body'] = snippet(resp.text, 160)
+                rec['hdr'] = {k: v for k, v in resp.headers.items() if k.lower().startswith(('retry-after', 'x-ratelimit', 'cf-', 'server'))}
+            else:
+                got, t0 = 0, time.time()
+                for chunk in resp.iter_content(1 << 20):
+                    got += len(chunk)
+                    if got >= 1500 << 20:
+                        break
+                total += got
+                rec.update(got_mb=round(got / 1e6), mb_s=round(got / (time.time() - t0) / 1e6, 1),
+                           account_total_mb=round(total / 1e6))
+        except Exception as err:
+            rec['err'] = f'{type(err).__name__}: {snippet(str(err), 160)}'
+        R['gf'].append(rec)
+        log('GFJOB', json.dumps(rec, ensure_ascii=False))
+        if total >= 9000 << 20 or time.time() - started > 1500:
+            break
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -214,8 +295,10 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile)):
-        if name in os.environ.get('SECTIONS', 'mediafire,gofile'):
+    sections = os.environ.get('SECTIONS', 'mfjob,gfjob').split(',')
+    for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
+                     ('gfjob', probe_gofile_job)):
+        if name in sections:
             try:
                 fn()
             except Exception:
