@@ -1,0 +1,31 @@
+name: Host Diagnosis
+on:
+  workflow_dispatch:
+    inputs:
+      sections:
+        description: 'mediafire, gofile or both'
+        default: 'mediafire,gofile'
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tools
+        run: pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils random_user_agent
+      - name: Diagnose
+        env:
+          SECTIONS: ${{ github.event.inputs.sections || 'mediafire,gofile' }}
+        run: python -u diag.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-results
+          path: diag_results.json
