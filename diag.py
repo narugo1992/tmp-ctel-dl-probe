@@ -286,6 +286,77 @@ def probe_gofile_job():
             break
 
 
+# ------------------------------------------- the mediafire pages that always answer 403
+def probe_mediafire_bad():
+    """Whether the pages that fail every time yield to another stack, and what a random sample looks like."""
+    for url in T['mediafire_bad']:
+        key = re.search(r'/file/([a-z0-9]+)', url).group(1)
+        for sname in mf_stacks():
+            rec = {'key': key, 'stack': sname}
+            try:
+                r = Stack(sname).get(url)
+                rec.update(http=r.status_code, server=r.headers.get('server'), mitig=r.headers.get('cf-mitigated'),
+                           title=title(r.text), button='downloadButton' in r.text, body=snippet(r.text, 140))
+            except Exception as err:
+                rec['err'] = f'{type(err).__name__}: {snippet(str(err), 100)}'
+            R['mf'].append(rec)
+            log('MFBAD', json.dumps(rec, ensure_ascii=False))
+        try:
+            r = requests.get(f'https://www.mediafire.com/api/1.5/file/get_info.php?quick_key={key}&response_format=json',
+                             timeout=30)
+            log('MFBAD-API', key, r.status_code, snippet(r.text, 400))
+        except Exception as err:
+            log('MFBAD-API-ERR', key, err)
+    # a random sample, each page twice with a fresh session, to tell a per-page verdict from a random one
+    import collections
+    outcome = collections.Counter()
+    for url in T['mediafire_rand']:
+        codes = []
+        for _ in range(2):
+            try:
+                codes.append(Stack('cffi:' + cffi_names()[0]).get(url).status_code)
+            except Exception as err:
+                codes.append(type(err).__name__)
+        outcome[tuple(codes)] += 1
+    log('MFBAD-SAMPLE', json.dumps({str(k): v for k, v in outcome.items()}))
+    R['mf'].append({'sample_outcomes': {str(k): v for k, v in outcome.items()}})
+
+
+# ------------------------------------------------- a random sample of gofile folders
+def probe_gofile_sample():
+    import collections
+    from inf.asiaon.hosts.base import get_plain_session
+    sess = get_plain_session()
+    token, wt = gofile._credentials(sess)
+    outcome, bodies = collections.Counter(), collections.Counter()
+    for url in T['gofile_rand']:
+        ident = re.search(r'gofile\.io/d/([\w-]+)', url).group(1)
+        try:
+            c = sess.get(f'https://api.gofile.io/contents/{ident}', timeout=30,
+                         headers={'Authorization': f'Bearer {token}', 'X-Website-Token': wt, 'X-BL': 'en-US'})
+            if c.status_code != 200:
+                outcome[f'contents {c.status_code} {snippet(c.text, 60)}'] += 1
+                continue
+            data = c.json()['data']
+            files = [x for x in (data.get('children') or {}).values() if x.get('type') == 'file']
+            if not files:
+                outcome['folder without files'] += 1
+                continue
+            sess.cookies.set('accountToken', token, domain='.gofile.io')
+            d = sess.get(files[0]['link'], headers={'Authorization': f'Bearer {token}', 'Range': 'bytes=0-1023'},
+                         stream=True, timeout=40)
+            if d.status_code in (200, 206):
+                outcome['file readable'] += 1
+            else:
+                outcome[f'file {d.status_code}'] += 1
+                bodies[snippet(d.text, 90)] += 1
+        except Exception as err:
+            outcome[f'err {type(err).__name__}'] += 1
+    log('GFSAMPLE', json.dumps(dict(outcome), ensure_ascii=False))
+    log('GFSAMPLE-BODIES', json.dumps(dict(bodies), ensure_ascii=False))
+    R['gf'].append({'sample_outcomes': dict(outcome), 'bodies': dict(bodies)})
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -295,9 +366,9 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'mfjob,gfjob').split(',')
+    sections = os.environ.get('SECTIONS', 'mfbad,gfsample').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
-                     ('gfjob', probe_gofile_job)):
+                     ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample)):
         if name in sections:
             try:
                 fn()
