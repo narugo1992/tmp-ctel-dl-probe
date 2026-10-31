@@ -357,6 +357,82 @@ def probe_gofile_sample():
     R['gf'].append({'sample_outcomes': dict(outcome), 'bodies': dict(bodies)})
 
 
+# ------------------------------------- which mediafire fingerprint is the most dependable
+def probe_mediafire_hard():
+    import collections
+    names = [b.value if hasattr(b, 'value') else str(b) for b in BrowserType]
+    stacks = [f'cffi:{n}' for n in sorted(names) if n.startswith(('chrome', 'safari', 'edge', 'firefox'))
+              and 'android' not in n and 'ios' not in n and 'tor' not in n]
+    log('MFHARD-STACKS', json.dumps(stacks))
+    urls = T['mediafire_bad']
+    table = {}
+    for sname in stacks:
+        ok = total = 0
+        for url in urls:
+            for _ in range(4):
+                total += 1
+                try:
+                    ok += 'downloadButton' in Stack(sname).get(url).text
+                except Exception:
+                    pass
+        table[sname] = f'{ok}/{total}'
+        log(f'MFHARD {sname}: {ok}/{total}')
+    R['mf'].append({'hard_table': table})
+    # the best stack on the age sample, one request each
+    best = max(table, key=lambda k: int(table[k].split('/')[0]))
+    by = collections.defaultdict(collections.Counter)
+    for url, month in T['mediafire_age']:
+        try:
+            by[month]['ok' if 'downloadButton' in Stack(best).get(url).text else 'blocked'] += 1
+        except Exception as err:
+            by[month][type(err).__name__] += 1
+    log('MFHARD-AGE', best, json.dumps({m: dict(c) for m, c in sorted(by.items())}))
+    R['mf'].append({'age': {m: dict(c) for m, c in by.items()}, 'best': best})
+
+
+# ------------------------------------------- gofile: is the content still there, by month
+def probe_gofile_age():
+    import collections
+    from inf.asiaon.hosts.base import get_plain_session
+    sess = get_plain_session()
+    token, wt = gofile._credentials(sess)
+    by = collections.defaultdict(collections.Counter)
+    for url, month in T['gofile_age']:
+        ident = re.search(r'gofile\.io/d/([\w-]+)', url).group(1)
+        verdict = None
+        for attempt in range(3):
+            try:
+                c = sess.get(f'https://api.gofile.io/contents/{ident}', timeout=30,
+                             headers={'Authorization': f'Bearer {token}', 'X-Website-Token': wt, 'X-BL': 'en-US'})
+                if c.status_code == 429:
+                    time.sleep(25)
+                    continue
+                if c.status_code != 200:
+                    verdict = f'contents {c.status_code}'
+                    break
+                files = [x for x in (c.json()['data'].get('children') or {}).values() if x.get('type') == 'file']
+                if not files:
+                    verdict = 'emptied'
+                    break
+                sess.cookies.set('accountToken', token, domain='.gofile.io')
+                d = sess.get(files[0]['link'], headers={'Authorization': f'Bearer {token}', 'Range': 'bytes=0-1023'},
+                             stream=True, timeout=40)
+                if d.status_code in (200, 206):
+                    verdict = 'readable'
+                elif 'cold storage' in d.text:
+                    verdict = 'cold storage'
+                else:
+                    verdict = f'file {d.status_code}'
+                break
+            except Exception as err:
+                verdict = f'err {type(err).__name__}'
+                break
+        by[month][verdict or 'rate limited'] += 1
+        time.sleep(2.5)
+    log('GFAGE', json.dumps({m: dict(c) for m, c in sorted(by.items())}, ensure_ascii=False))
+    R['gf'].append({'age': {m: dict(c) for m, c in by.items()}})
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -366,9 +442,10 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'mfbad,gfsample').split(',')
+    sections = os.environ.get('SECTIONS', 'mfhard,gfage').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
-                     ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample)):
+                     ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
+                     ('gfage', probe_gofile_age)):
         if name in sections:
             try:
                 fn()
