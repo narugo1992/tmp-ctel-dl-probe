@@ -484,6 +484,103 @@ def probe_mediafire_dl():
     log('MFDL-SPEEDS', json.dumps(speeds))
 
 
+# ------------------------------------------------------------------ pixeldrain, one stream or many
+PD_API = 'https://pixeldrain.com/api/file'
+
+
+def pd_files(min_mb=700):
+    out = []
+    for url in T['pixeldrain']:
+        m = re.search(r'pixeldrain\.com/u/([\w-]+)', url)
+        if not m:
+            continue
+        try:
+            info = requests.get(f'{PD_API}/{m.group(1)}/info', timeout=30).json()
+            if info.get('success', True) and not info.get('availability') and (info.get('size') or 0) >= min_mb << 20:
+                out.append((m.group(1), info['size']))
+        except Exception:
+            pass
+    return sorted(out, key=lambda x: -x[1])
+
+
+def pd_range(ident, start, end, hold=None, stop_after=None):
+    """Bytes of ``[start, end]`` read; ``(got, seconds, http)``."""
+    t0, got = time.time(), 0
+    r = requests.get(f'{PD_API}/{ident}', headers={'Range': f'bytes={start}-{end}', 'User-Agent': CHROME_UA},
+                     params={'download': ''}, stream=True, timeout=60)
+    if r.status_code not in (200, 206):
+        return 0, time.time() - t0, r.status_code
+    for chunk in r.iter_content(1 << 20):
+        got += len(chunk)
+        if stop_after and time.time() - t0 > stop_after:
+            break
+    return got, time.time() - t0, r.status_code
+
+
+def probe_pixeldrain():
+    from concurrent.futures import ThreadPoolExecutor
+    files = pd_files()
+    log('PD-FILES', json.dumps([(i, round(sz / 1e6)) for i, sz in files]))
+    if len(files) < 2:
+        log('PD-NOFILES')
+        return
+    mb = 1 << 20
+    # A: one stream, speed per 256 MB window
+    ident, size = files[0]
+    t0, got, win_t, win_b, rates = time.time(), 0, time.time(), 0, []
+    r = requests.get(f'{PD_API}/{ident}', params={'download': ''}, stream=True, timeout=60,
+                     headers={'User-Agent': CHROME_UA})
+    log('PD-A-HTTP', r.status_code, {k: v for k, v in r.headers.items() if k.lower().startswith(('x-', 'cf-', 'retry'))})
+    for chunk in r.iter_content(1 << 20):
+        got += len(chunk); win_b += len(chunk)
+        if win_b >= 256 * mb:
+            rates.append(round(win_b / (time.time() - win_t) / 1e6, 1)); win_t, win_b = time.time(), 0
+        if got >= 2500 * mb or time.time() - t0 > 150:
+            break
+    log('PD-A-SINGLE-WINDOWS-MB/s', json.dumps(rates), 'total_mb', round(got / 1e6))
+    R['pd_single'] = rates
+    # B: several ranges of another file at once
+    ident, size = files[1]
+    for n in (4, 8):
+        span = 128 * mb
+        t0 = time.time()
+        with ThreadPoolExecutor(n) as pool:
+            res = list(pool.map(lambda i: pd_range(ident, i * span, (i + 1) * span - 1), range(n)))
+        tot = sum(g for g, _, _ in res)
+        log(f'PD-B-{n}-THREADS', 'MB/s aggregate', round(tot / (time.time() - t0) / 1e6, 1),
+            'http', sorted({h for _, _, h in res}), 'each MB/s', [round(g / max(s, 1e-6) / 1e6, 1) for g, s, _ in res])
+    # C: is a new stream on another file still fast right after
+    ident, size = files[min(2, len(files) - 1)]
+    g, sec, h = pd_range(ident, 0, 400 * mb, stop_after=45)
+    log('PD-C-NEWSTREAM', 'MB/s', round(g / max(sec, 1e-6) / 1e6, 1), 'http', h)
+    # D: sustained, eight ranges at a time over a whole file, aggregate per 30 s
+    ident, size = files[0]
+    span, done, t_start, last, last_bytes, series = 64 * mb, 0, time.time(), time.time(), 0, []
+    total = 0
+    offsets = list(range(0, size, span))
+    with ThreadPoolExecutor(8) as pool:
+        futs = []
+        for off in offsets:
+            futs.append(pool.submit(pd_range, ident, off, min(off + span, size) - 1))
+        for f in futs:
+            g, _, _ = f.result()
+            total += g
+            if time.time() - last >= 30:
+                series.append(round((total - last_bytes) / (time.time() - last) / 1e6, 1))
+                last, last_bytes = time.time(), total
+            if time.time() - t_start > 600 or total > 6000 * mb:
+                for x in futs:
+                    x.cancel()
+                break
+    log('PD-D-SUSTAINED-8T-MB/s-per-30s', json.dumps(series), 'total_mb', round(total / 1e6),
+        'elapsed_s', round(time.time() - t_start))
+    R['pd_sustained'] = series
+    # E: after a rest, a single stream again
+    time.sleep(300)
+    g, sec, h = pd_range(files[-1][0], 0, 300 * mb, stop_after=30)
+    log('PD-E-AFTER-REST', 'MB/s', round(g / max(sec, 1e-6) / 1e6, 1), 'http', h)
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -493,10 +590,11 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'mfdl').split(',')
+    sections = os.environ.get('SECTIONS', 'pd').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
-                     ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl)):
+                     ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
+                     ('pd', probe_pixeldrain)):
         if name in sections:
             try:
                 fn()
