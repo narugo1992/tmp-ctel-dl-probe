@@ -433,6 +433,57 @@ def probe_gofile_age():
     R['gf'].append({'age': {m: dict(c) for m, c in by.items()}})
 
 
+# ----------------------------- mediafire end to end with fresh-session retries over several fingerprints
+ROTATION = ['chrome152', 'safari15_5', 'chrome151', 'safari17_0', 'chrome120', 'safari155', 'chrome136',
+            'chrome119', 'safari170', 'chrome151_macos']
+
+
+def page_with_retries(url, limit=12):
+    """``(html, attempts, fingerprint)`` of the first attempt that carries a download button, else ``(None, n, None)``."""
+    for attempt in range(1, limit + 1):
+        name = ROTATION[(attempt - 1) % len(ROTATION)]
+        try:
+            r = cffi.Session(impersonate=name).get(url, timeout=40)
+            if 'downloadButton' in r.text:
+                return r.text, attempt, name
+        except Exception:
+            pass
+        time.sleep(1)
+    return None, limit, None
+
+
+def probe_mediafire_dl():
+    import collections
+    urls = T['mediafire_bad'] + [u for u, _ in T['mediafire_age'][:10]]
+    attempts = collections.Counter()
+    speeds = []
+    for url in urls:
+        t0 = time.time()
+        html, n, fp = page_with_retries(url)
+        rec = {'url': url[:60], 'attempts': n, 'fingerprint': fp, 'page_s': round(time.time() - t0, 1)}
+        if html:
+            direct = extract_download_link(html)
+            rec['direct_host'] = re.sub(r'^(https?://[^/]+).*', r'\1', direct or '')
+            try:
+                t1, got = time.time(), 0
+                r = requests.get(direct, stream=True, timeout=60, headers={'User-Agent': CHROME_UA})
+                rec['dl_http'] = r.status_code
+                if r.status_code == 200:
+                    for chunk in r.iter_content(1 << 20):
+                        got += len(chunk)
+                        if got >= 300 << 20:
+                            break
+                    rec.update(dl_mb=round(got / 1e6), dl_mb_s=round(got / (time.time() - t1) / 1e6, 1))
+                    speeds.append(rec['dl_mb_s'])
+            except Exception as err:
+                rec['dl_err'] = f'{type(err).__name__}: {snippet(str(err), 80)}'
+        attempts[n if html else 'failed'] += 1
+        R['mf'].append(rec)
+        log('MFDL', json.dumps(rec, ensure_ascii=False))
+    log('MFDL-ATTEMPTS', json.dumps({str(k): v for k, v in sorted(attempts.items(), key=str)}))
+    log('MFDL-SPEEDS', json.dumps(speeds))
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -442,10 +493,10 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'mfhard,gfage').split(',')
+    sections = os.environ.get('SECTIONS', 'mfdl').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
-                     ('gfage', probe_gofile_age)):
+                     ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl)):
         if name in sections:
             try:
                 fn()
