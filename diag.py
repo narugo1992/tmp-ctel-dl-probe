@@ -581,6 +581,53 @@ def probe_pixeldrain():
     log('PD-E-AFTER-REST', 'MB/s', round(g / max(sec, 1e-6) / 1e6, 1), 'http', h)
 
 
+def probe_pixeldrain_heavy():
+    """Push past the volume at which pixeldrain was seen to throttle, then see what threads change."""
+    from concurrent.futures import ThreadPoolExecutor
+    files = pd_files(min_mb=500)
+    mb = 1 << 20
+    total, throttled_at = 0, None
+    for ident, size in files:
+        t0, got, win_t, win_b, rates = time.time(), 0, time.time(), 0, []
+        r = requests.get(f'{PD_API}/{ident}', params={'download': ''}, stream=True, timeout=60,
+                         headers={'User-Agent': CHROME_UA})
+        if r.status_code != 200:
+            log('PD2-HTTP', ident, r.status_code, snippet(r.text, 200))
+            continue
+        for chunk in r.iter_content(1 << 20):
+            got += len(chunk); win_b += len(chunk); total += len(chunk)
+            if win_b >= 256 * mb:
+                rate = win_b / (time.time() - win_t) / 1e6
+                rates.append(round(rate, 1)); win_t, win_b = time.time(), 0
+                if rate < 5 and throttled_at is None:
+                    throttled_at = total
+            if time.time() - t0 > 200:
+                break
+        log('PD2-FILE', ident, 'mb', round(got / 1e6), 'windows', json.dumps(rates), 'total_mb', round(total / 1e6))
+    log('PD2-THROTTLED-AT-MB', None if throttled_at is None else round(throttled_at / 1e6))
+
+    def probe_after(label):
+        ident, size = files[-1]
+        g, sec, h = pd_range(ident, 0, 300 * mb, stop_after=30)
+        log(f'PD2-{label}-SINGLE', 'MB/s', round(g / max(sec, 1e-6) / 1e6, 2), 'http', h)
+        span = 64 * mb
+        t0 = time.time()
+        with ThreadPoolExecutor(8) as pool:
+            res = list(pool.map(lambda i: pd_range(ident, i * span, (i + 1) * span - 1, stop_after=30), range(8)))
+        tot = sum(x[0] for x in res)
+        log(f'PD2-{label}-8THREADS', 'MB/s aggregate', round(tot / (time.time() - t0) / 1e6, 2),
+            'http', sorted({x[2] for x in res}))
+        with ThreadPoolExecutor(16) as pool:
+            t0 = time.time()
+            res = list(pool.map(lambda i: pd_range(ident, i * 32 * mb, (i + 1) * 32 * mb - 1, stop_after=30), range(16)))
+        log(f'PD2-{label}-16THREADS', 'MB/s aggregate', round(sum(x[0] for x in res) / (time.time() - t0) / 1e6, 2),
+            'http', sorted({x[2] for x in res}))
+
+    probe_after('NOW')
+    time.sleep(600)
+    probe_after('AFTER10MIN')
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -590,11 +637,11 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'pd').split(',')
+    sections = os.environ.get('SECTIONS', 'pd2').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
-                     ('pd', probe_pixeldrain)):
+                     ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy)):
         if name in sections:
             try:
                 fn()

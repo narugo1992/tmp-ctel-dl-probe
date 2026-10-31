@@ -3,8 +3,8 @@ on:
   workflow_dispatch:
     inputs:
       sections:
-        description: 'Comma list of mediafire, gofile, mfjob, gfjob, mfbad, gfsample, mfhard, gfage, mfdl, pd'
-        default: 'pd'
+        description: 'Comma list of mediafire, gofile, mfjob, gfjob, mfbad, gfsample, mfhard, gfage, mfdl, pd, pd2'
+        default: 'pd2'
 permissions:
   contents: read
 jobs:
@@ -22,7 +22,7 @@ jobs:
         run: pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils hfutils "huggingface_hub>=0.23,<1" httpx tqdm pytimeparse pyparsing pyarrow pandas pyrfc6266 random_user_agent cryptography click
       - name: Diagnose
         env:
-          SECTIONS: ${{ github.event.inputs.sections || 'pd' }}
+          SECTIONS: ${{ github.event.inputs.sections || 'pd2' }}
         run: python -u diag.py
       - uses: actions/upload-artifact@v4
         if: always()
