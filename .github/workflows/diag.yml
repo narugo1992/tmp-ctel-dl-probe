@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install tools
-        run: pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils random_user_agent
+        run: pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils hfutils huggingface_hub httpx tqdm pytimeparse pyparsing pyarrow pandas pyrfc6266 random_user_agent cryptography click
       - name: Diagnose
         env:
           SECTIONS: ${{ github.event.inputs.sections || 'mediafire,gofile' }}
