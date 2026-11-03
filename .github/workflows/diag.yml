@@ -3,8 +3,8 @@ on:
   workflow_dispatch:
     inputs:
       sections:
-        description: 'Comma list of mediafire, gofile, mfjob, gfjob, mfbad, gfsample, mfhard, gfage, mfdl, pd, pd2'
-        default: 'pd2'
+        description: 'Comma list of mediafire, gofile, mfjob, gfjob, mfbad, gfsample, mfhard, gfage, mfdl, pd, pd2, split'
+        default: 'split'
 permissions:
   contents: read
 jobs:
@@ -19,10 +19,12 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install tools
-        run: pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils hfutils "huggingface_hub>=0.23,<1" httpx tqdm pytimeparse pyparsing pyarrow pandas pyrfc6266 random_user_agent cryptography click
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full || true
+          pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils hfutils "huggingface_hub>=0.23,<1" httpx tqdm pytimeparse pyparsing pyarrow pandas pyrfc6266 random_user_agent cryptography click
       - name: Diagnose
         env:
-          SECTIONS: ${{ github.event.inputs.sections || 'pd2' }}
+          SECTIONS: ${{ github.event.inputs.sections || 'split' }}
         run: python -u diag.py
       - uses: actions/upload-artifact@v4
         if: always()

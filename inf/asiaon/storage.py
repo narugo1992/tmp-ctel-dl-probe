@@ -97,6 +97,10 @@ _WAIT_SLICE = 15.0
 _COOLDOWN = 20 * 60
 #: How many times in one run the job waits like that before giving up on the hosts for this run.
 _MAX_COOLDOWNS = 8
+#: Tries at one commit before it is put off to the next turn of the main loop, and the seconds waited between
+#: them. The hub answers 429 and 5xx now and then, and a run that dies on one throws away the batch in flight.
+_UPLOAD_ATTEMPTS = 5
+_UPLOAD_PAUSE = 60.0
 #: Posts in a row left for later because of a set-aside host, with at least one host still set aside, after
 #: which the job waits like that too: hosts that are not set aside cannot help with the posts it is walking.
 _DEFER_STREAK = 30
@@ -246,6 +250,7 @@ def fetch_package(post: Dict, work_dir: str, disabled: Set[str], strikes: Option
     whatever the post's final outcome, so the caller can record it.
     """
     outcomes: List[Tuple[str, str, str]] = []  # (host, 'gone' | 'fault' | 'skipped', text)
+    deterministic: List[bool] = []
     for host in HOSTS:
         url = usable_url(host, post)
         if not url:
@@ -299,7 +304,10 @@ def fetch_package(post: Dict, work_dir: str, disabled: Set[str], strikes: Option
                 # not touched here: on success they are what goes into the package.
                 if archive_file and os.path.exists(archive_file):
                     os.remove(archive_file)
-        if host.name in disabled and not (isinstance(verdict, DownloadError) and verdict.gone):
+        if isinstance(verdict, DownloadError) and verdict.unusable:
+            # Not dead and not the host's fault: this link just cannot give a package (a split archive volume).
+            kind = 'skipped'
+        elif host.name in disabled and not (isinstance(verdict, DownloadError) and verdict.gone):
             # The host is refusing this run as a whole, which says nothing about the post: it is not a fault.
             kind = 'skipped'
         else:
@@ -307,6 +315,9 @@ def fetch_package(post: Dict, work_dir: str, disabled: Set[str], strikes: Option
         if kind == 'gone' and gone_hosts is not None:
             gone_hosts[host.name] = {'kind': verdict.kind, 'reason': str(verdict)[:300]}
         outcomes.append((host.name, kind, f'{host.name}: {verdict!r}'))
+        if kind == 'fault':
+            # A verdict on the archive itself, which no other run or host would change, is not a sign of trouble.
+            deterministic.append(isinstance(verdict, UnpackError) and 'Refused unsafe archive' in str(verdict))
 
     text = '; '.join(item[2] for item in outcomes)
     asked = [item for item in outcomes if item[1] != 'skipped']
@@ -316,7 +327,9 @@ def fetch_package(post: Dict, work_dir: str, disabled: Set[str], strikes: Option
     if all(item[1] == 'gone' for item in asked):
         # Every host that was asked says it is gone. If another was not asked, that one may still have it.
         raise (PackageDeferred(text) if skipped else PackageUnavailable(text))
-    raise PackageFailed(text)
+    failure = PackageFailed(text)
+    failure.deterministic = bool(deterministic) and all(deterministic)
+    raise failure
 
 
 def build_package(post_id: str, unpack_dir: str, batch_dir: str) -> Tuple[str, int, int, List[str]]:
@@ -607,15 +620,29 @@ def sync(index_repository: str, repository: str, max_time_limit: Optional[float]
             if dry_run:
                 logging.info(f'[dry-run] Would upload: {message}, {state["batch_bytes"]} bytes.')
             else:
-                upload_limiter.try_acquire('hf upload limit')
-                safe_upload_directory_as_directory(
-                    repo_id=repository,
-                    repo_type='dataset',
-                    local_directory=batch_dir,
-                    path_in_repo='.',
-                    message=message,
-                    hf_token=os.environ['HF_TOKEN'],
-                )
+                for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
+                    try:
+                        upload_limiter.try_acquire('hf upload limit')
+                        safe_upload_directory_as_directory(
+                            repo_id=repository,
+                            repo_type='dataset',
+                            local_directory=batch_dir,
+                            path_in_repo='.',
+                            message=message,
+                            hf_token=os.environ['HF_TOKEN'],
+                        )
+                        break
+                    except Exception as err:
+                        logging.warning(f'Commit failed (attempt {attempt}/{_UPLOAD_ATTEMPTS}): {err!r}')
+                        if attempt == _UPLOAD_ATTEMPTS:
+                            if force or state['batch_bytes'] >= 2 * max_batch_bytes:
+                                raise
+                            # Everything stays pending and on disk and goes up with the next commit, so a hub
+                            # that is busy for a while costs time and not the batch.
+                            logging.warning('Commit put off, the batch stays pending.')
+                            state['last_deploy'] = time.time()
+                            return
+                        time.sleep(_UPLOAD_PAUSE * attempt)
             # The batch is committed: its rows become part of the live tables and its files leave the disk.
             if pending_posts:
                 df_posts, df_files = all_posts, all_files
@@ -724,7 +751,8 @@ def sync(index_repository: str, repository: str, max_time_limit: Optional[float]
                 counts['failed'] += 1
                 deferred_streak = 0
                 failed_ids.append(post['id'])
-                fail_streak += 1
+                if not getattr(err, 'deterministic', False):
+                    fail_streak += 1  # an archive refused as unsafe says nothing about how the run is going
                 if fail_streak >= max_consecutive_failures:
                     _abandon()
                     _deploy(force=True)

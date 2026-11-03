@@ -628,6 +628,54 @@ def probe_pixeldrain_heavy():
     probe_after('AFTER10MIN')
 
 
+# ----------------------------------------- split archives: every volume, joined, then unpacked as the job does
+def probe_split():
+    import shutil, tempfile
+    from inf.asiaon import storage as st
+    for item in T['split']:
+        work = tempfile.mkdtemp(prefix='split-')
+        path = os.path.join(work, 'package.zip')
+        expected = sum(p['size'] for p in item['parts'])
+        t0, written, attempts = time.time(), 0, []
+        ok = True
+        with open(path, 'wb') as out:
+            for part in item['parts']:
+                url = f"https://www.mediafire.com/file/{part['key']}/file"
+                html, n, fp = page_with_retries(url)
+                attempts.append(n)
+                if not html:
+                    ok = False
+                    log('SPLIT-PAGE-FAILED', part['key'])
+                    break
+                direct = extract_download_link(html)
+                r = requests.get(direct, stream=True, timeout=60, headers={'User-Agent': CHROME_UA})
+                disp = r.headers.get('Content-Disposition', '')[:90]
+                got = 0
+                for chunk in r.iter_content(1 << 20):
+                    out.write(chunk)
+                    got += len(chunk)
+                written += got
+                log('SPLIT-PART', part['key'], 'http', r.status_code, 'bytes', got, 'expected', part['size'], 'cd', disp)
+                if got != part['size']:
+                    ok = False
+        dl_s = round(time.time() - t0)
+        log('SPLIT-JOINED', item['id'][:40], 'bytes', written, 'expected', expected, 'ok', ok, 'page attempts', attempts,
+            'download seconds', dl_s)
+        with open(path, 'rb') as f:
+            log('SPLIT-HEAD', f.read(8))
+        unpack_dir = os.path.join(work, 'unpacked')
+        os.makedirs(unpack_dir)
+        t1 = time.time()
+        try:
+            n_files = st.unpack_package(path, unpack_dir, item['password'])
+            total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(unpack_dir) for f in fs)
+            log('SPLIT-UNPACK', item['id'][:40], 'files', n_files, 'bytes', total, 'seconds', round(time.time() - t1))
+            R['split_ok'] = R.get('split_ok', 0) + 1
+        except Exception as err:
+            log('SPLIT-UNPACK-FAILED', item['id'][:40], type(err).__name__, snippet(str(err), 300))
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -637,11 +685,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'pd2').split(',')
+    sections = os.environ.get('SECTIONS', 'split').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
-                     ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy)):
+                     ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
+                     ('split', probe_split)):
         if name in sections:
             try:
                 fn()
