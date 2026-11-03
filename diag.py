@@ -699,6 +699,44 @@ def probe_split_job():
         shutil.rmtree(work, ignore_errors=True)
 
 
+def probe_zerochan():
+    import hashlib
+    sess = cffi.Session(impersonate='chrome131')
+
+    def clear():
+        r = sess.get('https://www.zerochan.net/1girl', timeout=30)
+        m = re.search(r'<img\s+src="(/[^"]+)"', r.text)
+        if m:
+            sess.get('https://www.zerochan.net' + m.group(1), timeout=30)
+
+    try:
+        clear()
+    except Exception as err:
+        log('ZC-CLEAR-ERR', err)
+    log('ZC-COOKIES', list(sess.cookies.keys()))
+    for host in ('https://www.zerochan.net', 'https://zerochan.net'):
+        for path in ('/', '/4733497', '/1girl', '/login'):
+            try:
+                r = sess.get(host + path, timeout=30, allow_redirects=True)
+                if r.status_code == 503 and 'Checking browser' in r.text:
+                    clear()
+                    r = sess.get(host + path, timeout=30, allow_redirects=True)
+                log('ZC-PAGE', host + path, r.status_code, len(r.text), r.headers.get('server'), snippet(r.text, 70))
+            except Exception as err:
+                log('ZC-PAGE-ERR', host + path, type(err).__name__, snippet(str(err), 80))
+    ok = 0
+    for item in T['zc_images']:
+        try:
+            r = requests.get(item['file_url'], timeout=60,
+                             headers={'User-Agent': CHROME_UA, 'Referer': 'https://www.zerochan.net/'})
+            match = r.status_code == 200 and hashlib.md5(r.content).hexdigest() == item['hash']
+            ok += match
+            log('ZC-IMG', item['id'], r.status_code, len(r.content), 'md5 match', match)
+        except Exception as err:
+            log('ZC-IMG-ERR', item['id'], type(err).__name__)
+    log('ZC-IMG-SUMMARY', ok, 'of', len(T['zc_images']), 'downloaded with a matching md5')
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -708,12 +746,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'splitjob').split(',')
+    sections = os.environ.get('SECTIONS', 'zc').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
                      ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
-                     ('split', probe_split), ('splitjob', probe_split_job)):
+                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan)):
         if name in sections:
             try:
                 fn()
