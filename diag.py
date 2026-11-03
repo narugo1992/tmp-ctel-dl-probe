@@ -676,6 +676,29 @@ def probe_split():
         shutil.rmtree(work, ignore_errors=True)
 
 
+def probe_split_job():
+    """The job's own split-archive route, on the real post pages, then its own unpack."""
+    import shutil, tempfile
+    from inf.asiaon import storage as st
+    from inf.asiaon.hosts import mediafire as mf
+    for item in T['splitjob']:
+        work = tempfile.mkdtemp(prefix='splitjob-')
+        t0 = time.time()
+        try:
+            path = mf.download_mediafire_post_volumes({'id': item['id']}, work)
+            log('SPLITJOB-DOWNLOADED', item['id'][:40], os.path.basename(path), os.path.getsize(path), 'bytes',
+                round(time.time() - t0), 's', 'left in dir', sorted(os.listdir(work)))
+            unpack_dir = os.path.join(work, 'unpacked'); os.makedirs(unpack_dir)
+            t1 = time.time()
+            n = st.unpack_package(path, unpack_dir, 'asiaon.top')
+            total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(unpack_dir) for f in fs)
+            log('SPLITJOB-UNPACKED', item['id'][:40], 'files', n, 'bytes', total, round(time.time() - t1), 's')
+        except Exception as err:
+            log('SPLITJOB-FAILED', item['id'][:40], type(err).__name__, snippet(str(err), 300), 'unusable',
+                getattr(err, 'unusable', None), 'refused', getattr(err, 'refused', None))
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -685,12 +708,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'split').split(',')
+    sections = os.environ.get('SECTIONS', 'splitjob').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
                      ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
-                     ('split', probe_split)):
+                     ('split', probe_split), ('splitjob', probe_split_job)):
         if name in sections:
             try:
                 fn()
