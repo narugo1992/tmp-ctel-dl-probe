@@ -21,7 +21,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full || true
-          pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils hfutils "huggingface_hub>=0.23,<1" httpx tqdm pytimeparse pyparsing pyarrow pandas pyrfc6266 random_user_agent cryptography click
+          pip install cloudscraper curl_cffi requests pyquery lxml di-toolkit hbutils hfutils "huggingface_hub>=0.23,<1" httpx tqdm pytimeparse pyparsing pyarrow pandas pyrfc6266 random_user_agent cryptography click pyrate-limiter pyparsing pytimeparse
       - name: Diagnose
         env:
           SECTIONS: ${{ github.event.inputs.sections || 'split' }}
