@@ -767,7 +767,7 @@ def probe_gelbooru():
     from concurrent.futures import ThreadPoolExecutor
     items = json.load(open('gb_sample.json'))
     log('GB-SAMPLE', len(items))
-    H = {'User-Agent': CHROME_UA}
+    H = {'User-Agent': CHROME_UA, 'Referer': 'https://gelbooru.com/'}
 
     # A: census - status and size of every sample image, without reading the body
     def head(it):
@@ -779,7 +779,7 @@ def probe_gelbooru():
             r.close()
             return out
         except Exception as err:
-            return (type(err).__name__, 0, '', round(time.time() - t0, 2))
+            return (type(err).__name__ + '@' + it['file_url'].split('/')[2], 0, '', round(time.time() - t0, 2))
     with ThreadPoolExecutor(16) as pool:
         res = list(pool.map(head, items))
     codes = collections.Counter(str(x[0]) for x in res)
@@ -801,9 +801,9 @@ def probe_gelbooru():
         try:
             r = requests.get(it['file_url'], headers=H, timeout=90)
             ok = r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5']
-            return (r.status_code, len(r.content), ok, time.time() - t0)
+            return (r.status_code if r.status_code != 200 or ok else '200-but-wrong-body', len(r.content), ok, time.time() - t0)
         except Exception as err:
-            return (type(err).__name__, 0, False, time.time() - t0)
+            return (type(err).__name__ + '@' + it['file_url'].split('/')[2], 0, False, time.time() - t0)
     t0 = time.time()
     with ThreadPoolExecutor(16) as pool:
         out = list(pool.map(whole, chosen))
@@ -826,7 +826,8 @@ def probe_gelbooru():
     # D: another client stack for comparison
     def whole_cffi(it):
         try:
-            r = cffi.Session(impersonate='chrome131').get(it['file_url'], timeout=90)
+            r = cffi.Session(impersonate='chrome131').get(it['file_url'], timeout=90,
+                                                          headers={'Referer': 'https://gelbooru.com/'})
             return r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5']
         except Exception:
             return False
@@ -872,7 +873,7 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'gbg').split(',')
+    sections = os.environ.get('SECTIONS', 'gb').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
