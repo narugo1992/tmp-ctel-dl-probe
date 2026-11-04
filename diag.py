@@ -2,6 +2,7 @@
 
 Read-only: pages and the first kilobyte of files, plus one capped speed sample. Nothing is kept.
 """
+import collections
 import json
 import os
 import re
@@ -761,6 +762,79 @@ def probe_danbooru_post():
             log('DBPOST-ERR', pid, type(err).__name__, snippet(str(err), 100))
 
 
+def probe_gelbooru():
+    import hashlib, statistics
+    from concurrent.futures import ThreadPoolExecutor
+    items = json.load(open('gb_sample.json'))
+    log('GB-SAMPLE', len(items))
+    H = {'User-Agent': CHROME_UA}
+
+    # A: census - status and size of every sample image, without reading the body
+    def head(it):
+        t0 = time.time()
+        try:
+            r = requests.get(it['file_url'], headers=H, stream=True, timeout=40)
+            out = (r.status_code, int(r.headers.get('Content-Length') or 0), r.headers.get('Content-Type', '')[:14],
+                   round(time.time() - t0, 2))
+            r.close()
+            return out
+        except Exception as err:
+            return (type(err).__name__, 0, '', round(time.time() - t0, 2))
+    with ThreadPoolExecutor(16) as pool:
+        res = list(pool.map(head, items))
+    codes = collections.Counter(str(x[0]) for x in res)
+    sizes = [x[1] for x in res if x[0] == 200 and x[1]]
+    log('GB-CENSUS-STATUS', dict(codes))
+    if sizes:
+        log('GB-CENSUS-SIZE', 'n', len(sizes), 'mean MB', round(statistics.mean(sizes) / 1e6, 2), 'median MB',
+            round(statistics.median(sizes) / 1e6, 2), 'p90 MB', round(sorted(sizes)[int(len(sizes) * .9)] / 1e6, 2),
+            'max MB', round(max(sizes) / 1e6, 1), 'sum MB', round(sum(sizes) / 1e6))
+        by_mime = collections.defaultdict(list)
+        for it, x in zip(items, res):
+            if x[0] == 200 and x[1]:
+                by_mime[it['mimetype']].append(x[1])
+        log('GB-CENSUS-BY-MIME', {k: (len(v), round(statistics.mean(v) / 1e6, 2)) for k, v in by_mime.items()})
+    # B: whole files with md5 against the index, 16 threads, throughput
+    chosen = items[:40] + items[40:140]
+    def whole(it):
+        t0 = time.time()
+        try:
+            r = requests.get(it['file_url'], headers=H, timeout=90)
+            ok = r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5']
+            return (r.status_code, len(r.content), ok, time.time() - t0)
+        except Exception as err:
+            return (type(err).__name__, 0, False, time.time() - t0)
+    t0 = time.time()
+    with ThreadPoolExecutor(16) as pool:
+        out = list(pool.map(whole, chosen))
+    wall = time.time() - t0
+    tot = sum(x[1] for x in out)
+    log('GB-WHOLE', 'files', len(out), 'md5 ok', sum(x[2] for x in out), 'status', dict(collections.Counter(str(x[0]) for x in out)),
+        'MB', round(tot / 1e6), 'wall s', round(wall, 1), 'MB/s', round(tot / 1e6 / wall, 1))
+    bad = [(it['id'], x[0]) for it, x in zip(chosen, out) if not x[2]][:6]
+    log('GB-WHOLE-BAD', bad)
+    # C: how the site answers more threads
+    for workers in (32,):
+        more = items[140:300]
+        t0 = time.time()
+        with ThreadPoolExecutor(workers) as pool:
+            out2 = list(pool.map(whole, more))
+        wall = time.time() - t0
+        log(f'GB-THREADS-{workers}', 'files', len(out2), 'md5 ok', sum(x[2] for x in out2), 'status',
+            dict(collections.Counter(str(x[0]) for x in out2)), 'MB', round(sum(x[1] for x in out2) / 1e6),
+            'MB/s', round(sum(x[1] for x in out2) / 1e6 / wall, 1))
+    # D: another client stack for comparison
+    def whole_cffi(it):
+        try:
+            r = cffi.Session(impersonate='chrome131').get(it['file_url'], timeout=90)
+            return r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5']
+        except Exception:
+            return False
+    with ThreadPoolExecutor(8) as pool:
+        ok = list(pool.map(whole_cffi, items[:24]))
+    log('GB-CFFI', sum(ok), 'of', len(ok), 'md5 ok')
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -770,12 +844,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'dbpost').split(',')
+    sections = os.environ.get('SECTIONS', 'gb').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
                      ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
-                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post)):
+                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post), ('gb', probe_gelbooru)):
         if name in sections:
             try:
                 fn()
