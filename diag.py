@@ -823,6 +823,17 @@ def probe_gelbooru():
         log(f'GB-THREADS-{workers}', 'files', len(out2), 'md5 ok', sum(x[2] for x in out2), 'status',
             dict(collections.Counter(str(x[0]) for x in out2)), 'MB', round(sum(x[1] for x in out2) / 1e6),
             'MB/s', round(sum(x[1] for x in out2) / 1e6 / wall, 1))
+    # C2: slower settings on fresh slices, to see where the site starts refusing
+    for workers, lo, hi in ((1, 0, 40), (4, 40, 120), (8, 120, 220)):
+        sl = items[lo:hi]
+        t0 = time.time()
+        with ThreadPoolExecutor(workers) as pool:
+            o = list(pool.map(whole, sl))
+        wall = time.time() - t0
+        log(f'GB-SWEEP-{workers}T', 'files', len(o), 'md5 ok', sum(x[2] for x in o), 'status',
+            dict(collections.Counter(str(x[0]) for x in o)), 'MB', round(sum(x[1] for x in o) / 1e6),
+            'MB/s', round(sum(x[1] for x in o) / 1e6 / max(wall, 1e-6), 1), 'wall s', round(wall))
+        time.sleep(20)
     # D: another client stack for comparison
     def whole_cffi(it):
         try:
