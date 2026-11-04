@@ -737,6 +737,30 @@ def probe_zerochan():
     log('ZC-IMG-SUMMARY', ok, 'of', len(T['zc_images']), 'downloaded with a matching md5')
 
 
+def probe_danbooru_post():
+    sess = cffi.Session(impersonate='chrome131')
+    for pid in (11543719, 11543718, 11543717, 11543700):
+        try:
+            r = sess.get(f'https://danbooru.donmai.us/posts/{pid}.json', timeout=30)
+            info = ''
+            if r.status_code == 200:
+                j = r.json()
+                info = {k: j.get(k) for k in ('is_banned', 'is_deleted', 'is_pending', 'rating', 'file_ext', 'file_size',
+                                              'uploader_id', 'created_at')}
+                for key in ('file_url', 'large_file_url'):
+                    url = j.get(key)
+                    if not url:
+                        info[key] = None
+                        continue
+                    h = sess.get(url, timeout=60, headers={'Referer': 'https://danbooru.donmai.us/'})
+                    info[key] = (h.status_code, h.headers.get('content-type', '')[:20], len(h.content))
+            else:
+                info = snippet(r.text, 90)
+            log('DBPOST', pid, r.status_code, info)
+        except Exception as err:
+            log('DBPOST-ERR', pid, type(err).__name__, snippet(str(err), 100))
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -746,12 +770,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'zc').split(',')
+    sections = os.environ.get('SECTIONS', 'dbpost').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
                      ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
-                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan)):
+                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post)):
         if name in sections:
             try:
                 fn()
