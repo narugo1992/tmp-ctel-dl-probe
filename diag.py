@@ -875,6 +875,50 @@ def probe_gelbooru_gentle():
         time.sleep(30)
 
 
+def probe_gelbooru_cffi():
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+    items = json.load(open('gb_sample.json'))
+    H = {'Referer': 'https://gelbooru.com/'}
+    sess_pool = {}
+
+    def whole(it, name='chrome131', shared=None):
+        t0 = time.time()
+        try:
+            sess = shared or cffi.Session(impersonate=name)
+            r = sess.get(it['file_url'], timeout=90, headers=H)
+            ok = r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5']
+            return (r.status_code if r.status_code != 200 or ok else '200-wrong-body', len(r.content), ok)
+        except Exception as err:
+            return (type(err).__name__, 0, False)
+    plan = ((1, 0, 40, 'fresh'), (4, 40, 120, 'fresh'), (8, 120, 220, 'fresh'), (16, 220, 300, 'fresh'),
+            (16, 0, 80, 'shared'), (32, 80, 240, 'fresh'))
+    for workers, lo, hi, mode in plan:
+        sl = items[lo:hi]
+        shared = cffi.Session(impersonate='chrome131') if mode == 'shared' else None
+        t0 = time.time()
+        with ThreadPoolExecutor(workers) as pool:
+            o = list(pool.map(lambda it: whole(it, shared=shared), sl))
+        wall = time.time() - t0
+        log(f'GB-CFFI-{workers}T-{mode}', 'files', len(o), 'md5 ok', sum(x[2] for x in o), 'status',
+            dict(collections.Counter(str(x[0]) for x in o)), 'MB', round(sum(x[1] for x in o) / 1e6),
+            'MB/s', round(sum(x[1] for x in o) / 1e6 / max(wall, 1e-6), 1), 'wall s', round(wall))
+        time.sleep(20)
+    # the same plain-requests stack once more with the browser's accept headers, to see whether the stack is the cause
+    H2 = {'Referer': 'https://gelbooru.com/', 'User-Agent': CHROME_UA,
+          'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9'}
+    def req_whole(it):
+        try:
+            r = requests.get(it['file_url'], headers=H2, timeout=90)
+            return r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5'], r.status_code
+        except Exception as err:
+            return False, type(err).__name__
+    with ThreadPoolExecutor(4) as pool:
+        o = list(pool.map(req_whole, items[:60]))
+    log('GB-REQUESTS-4T-BROWSER-HEADERS', 'md5 ok', sum(x[0] for x in o), 'of', len(o),
+        dict(collections.Counter(str(x[1]) for x in o)))
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -884,12 +928,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'gb').split(',')
+    sections = os.environ.get('SECTIONS', 'gbc').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
                      ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
-                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post), ('gb', probe_gelbooru), ('gbg', probe_gelbooru_gentle)):
+                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post), ('gb', probe_gelbooru), ('gbg', probe_gelbooru_gentle), ('gbc', probe_gelbooru_cffi)):
         if name in sections:
             try:
                 fn()
