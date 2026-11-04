@@ -835,6 +835,34 @@ def probe_gelbooru():
     log('GB-CFFI', sum(ok), 'of', len(ok), 'md5 ok')
 
 
+def probe_gelbooru_gentle():
+    import hashlib, statistics
+    items = json.load(open('gb_sample.json'))
+    H = {'User-Agent': CHROME_UA}
+    def one(it, stack):
+        t0 = time.time()
+        try:
+            if stack == 'requests':
+                r = requests.get(it['file_url'], headers=H, timeout=60)
+            else:
+                r = cffi.Session(impersonate='chrome131').get(it['file_url'], timeout=60)
+            ok = r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5']
+            return (r.status_code, len(r.content), ok, round(time.time() - t0, 2), r.headers.get('retry-after'))
+        except Exception as err:
+            return (type(err).__name__, 0, False, round(time.time() - t0, 2), None)
+    for stack, pause, n in (('requests', 1.0, 40), ('requests', 3.0, 30), ('cffi', 1.0, 30)):
+        out = []
+        t0 = time.time()
+        for it in items[:n]:
+            out.append(one(it, stack))
+            time.sleep(pause)
+        wall = time.time() - t0
+        log(f'GB-GENTLE {stack} pause {pause}s', 'n', n, 'status', dict(collections.Counter(str(x[0]) for x in out)),
+            'md5 ok', sum(x[2] for x in out), 'MB', round(sum(x[1] for x in out) / 1e6, 1),
+            'first statuses', [x[0] for x in out[:12]], 'retry-after', sorted({str(x[4]) for x in out if x[4]}))
+        time.sleep(30)
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -844,12 +872,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'gb').split(',')
+    sections = os.environ.get('SECTIONS', 'gbg').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
                      ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
-                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post), ('gb', probe_gelbooru)):
+                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post), ('gb', probe_gelbooru), ('gbg', probe_gelbooru_gentle)):
         if name in sections:
             try:
                 fn()
