@@ -919,6 +919,54 @@ def probe_gelbooru_cffi():
         dict(collections.Counter(str(x[1]) for x in o)))
 
 
+def probe_gelbooru_rate():
+    import hashlib
+    from queue import Queue
+    from concurrent.futures import ThreadPoolExecutor
+    items = json.load(open('gb_sample_big.json'))
+    H = {'Referer': 'https://gelbooru.com/', 'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+         'Accept-Language': 'en-US,en;q=0.9'}
+    pool = Queue()
+    for i in range(12):
+        pool.put(cffi.Session(impersonate=['chrome131', 'chrome124', 'chrome136'][i % 3]))
+
+    def task(it):
+        sess = pool.get()
+        t0 = time.time()
+        try:
+            r = sess.get(it['file_url'], timeout=90, headers=H)
+            ok = r.status_code == 200 and hashlib.md5(r.content).hexdigest() == it['md5']
+            return (r.status_code if r.status_code != 200 or ok else 'wrong-body', len(r.content), ok, time.time() - t0)
+        except Exception as err:
+            return (type(err).__name__, 0, False, time.time() - t0)
+        finally:
+            pool.put(sess)
+
+    cursor = 0
+    for rate, seconds in ((2, 120), (4, 120), (8, 120), (2, 120)):
+        n = int(rate * seconds)
+        batch = items[cursor:cursor + n]
+        cursor += n
+        futs, t0 = [], time.time()
+        with ThreadPoolExecutor(48) as ex:
+            for k, it in enumerate(batch):
+                delay = t0 + k / rate - time.time()
+                if delay > 0:
+                    time.sleep(delay)
+                futs.append(ex.submit(task, it))
+            out = [f.result() for f in futs]
+        wall = time.time() - t0
+        by_minute = []
+        for m in range(0, len(out), rate * 30):
+            chunk = out[m:m + rate * 30]
+            by_minute.append(f'{sum(x[2] for x in chunk)}/{len(chunk)}')
+        log(f'GB-RATE {rate}/s', 'requests', len(out), 'md5 ok', sum(x[2] for x in out),
+            'status', dict(collections.Counter(str(x[0]) for x in out)),
+            'MB', round(sum(x[1] for x in out) / 1e6), 'MB/s', round(sum(x[1] for x in out) / 1e6 / wall, 1),
+            'ok per 30s', by_minute, 'median latency s', round(sorted(x[3] for x in out)[len(out) // 2], 2))
+        time.sleep(30)
+
+
 def main():
     t0 = time.time()
     for url in ('https://api.ipify.org?format=json', 'https://ipinfo.io/json'):
@@ -928,12 +976,12 @@ def main():
             log('ENV', url, snippet(r.text, 300))
         except Exception as err:
             log('ENV-ERR', url, err)
-    sections = os.environ.get('SECTIONS', 'gbc').split(',')
+    sections = os.environ.get('SECTIONS', 'gbr').split(',')
     for name, fn in (('mediafire', probe_mediafire), ('gofile', probe_gofile), ('mfjob', probe_mediafire_job),
                      ('gfjob', probe_gofile_job), ('mfbad', probe_mediafire_bad), ('gfsample', probe_gofile_sample), ('mfhard', probe_mediafire_hard),
                      ('gfage', probe_gofile_age), ('mfdl', probe_mediafire_dl),
                      ('pd', probe_pixeldrain), ('pd2', probe_pixeldrain_heavy),
-                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post), ('gb', probe_gelbooru), ('gbg', probe_gelbooru_gentle), ('gbc', probe_gelbooru_cffi)):
+                     ('split', probe_split), ('splitjob', probe_split_job), ('zc', probe_zerochan), ('dbpost', probe_danbooru_post), ('gb', probe_gelbooru), ('gbg', probe_gelbooru_gentle), ('gbc', probe_gelbooru_cffi), ('gbr', probe_gelbooru_rate)):
         if name in sections:
             try:
                 fn()
